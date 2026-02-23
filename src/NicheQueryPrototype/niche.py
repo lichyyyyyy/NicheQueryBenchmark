@@ -1,13 +1,15 @@
 import logging
 from typing import List, Optional
 
+import numpy as np
 import torch
 from torch_geometric.nn import knn_graph
 from torch_geometric.utils import k_hop_subgraph
 
-from src.NicheDataset.database import Cell, Database
+from src.NicheQueryPrototype.database import Cell, Database
 
 logger = logging.getLogger(__name__)
+
 
 
 class Niche:
@@ -18,16 +20,16 @@ class Niche:
     def __init__(
             self,
     ):
-        # List of cells that belong to this niche
+        # [Required] List of cells that belong to this niche
         self.cells = []
 
-        # ID of the sample this niche belongs to
+        # [Required] ID of the sample this niche belongs to
         self.sample_id = ''
 
         # Neighborhood size parameter
         self.k = 0
 
-        # Parcellation index for this niche
+        # [Required] Parcellation index for this niche
         self.parcellation_index = 0
 
         # Maximum number of cells allowed in the niche
@@ -35,6 +37,13 @@ class Niche:
 
         # The center cell of the niche (optional)
         self.center_cell = None
+        self.feature = None
+
+    def compute_niche_feature(self):
+        assert len(self.cells) > 0, 'Empty cells in the niche'
+        cell_features = np.array([c.feature for c in self.cells])
+        self.feature = cell_features.mean(axis=0)
+
 
     """
     Construct a niche by given cells and sample.
@@ -63,6 +72,7 @@ class Niche:
                 self.cells.append(cell)
             if cell_limit is not None and len(self.cells) >= cell_limit:
                 break
+        self.compute_niche_feature()
 
     """
     Construct a niche by a parcellation and a sample.
@@ -81,6 +91,7 @@ class Niche:
                 self.cells.append(cell)
             if cell_limit is not None and len(self.cells) >= cell_limit:
                 break
+        self.compute_niche_feature()
 
     """
     Construct a niche by a center cell and k-hop.
@@ -118,3 +129,4 @@ class Niche:
             self.cells.extend(subset[:cell_limit])
         else:
             self.cells.extend(subset)
+        self.compute_niche_feature()
