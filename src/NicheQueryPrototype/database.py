@@ -59,7 +59,7 @@ class Sample:
         self.niche_features: List[np.ndarray] = []
 
         # If ture, the cell i belongs to the target parcellation section.
-        self.target_parcellation_mask: np.ndarray = np.array([])
+        self.target_parcellation_mask: Optional[np.ndarray] = None
 
 
 class Database:
