@@ -70,31 +70,15 @@ class Sample:
     """
     Construct an adata from the source adata list.
     """
-
-    def construct_adata(self, adata_list: List[AnnData]):
-        cell_ids = set([c.id for c in self.cells])
-
-        filtered_adata_list = [
-            adata[adata.obs_names.isin(cell_ids)].copy()
-            for adata in adata_list
-        ]
-        filtered_adata_list = [adata for adata in filtered_adata_list if adata.n_obs > 0]
-
-        if len(filtered_adata_list) > 0:
-            self.adata = ad.concat(filtered_adata_list, join="outer", merge="same")
-        else:
+    def construct_adata(self):
+        cell_ids = [c.id for c in self.cells]
+        if len(cell_ids) == 0:
             self.adata = None
             return
-
-        coords_df = pd.DataFrame(
-            {
-                "x": [c.x for c in self.cells],
-                "y": [c.y for c in self.cells],
-            },
-            index=[c.id for c in self.cells],
-        )
-        coords_df = coords_df.reindex(self.adata.obs_names)
-        self.adata.obsm["X_spatial"] = coords_df[["x", "y"]].to_numpy(dtype=float)
+        obs = pd.DataFrame(index=pd.Index(cell_ids, name="cell_id"))
+        coords = np.asarray([[c.x, c.y] for c in self.cells], dtype=float)
+        self.adata = ad.AnnData(X=None, obs=obs)
+        self.adata.obsm["X_spatial"] = coords
 
 
 class Database:
@@ -102,11 +86,12 @@ class Database:
     Represents a database containing multiple samples.
     """
 
-    def __init__(self):
+    def __init__(self, target_sample_ids: Optional[List[str]] = None):
         self.cells: List[Cell] = []
         self.samples: Dict[str, Sample] = {}
         self.merged_cell_metadata: pd.DataFrame = pd.DataFrame()
         self.parcellation_tree = {}
+        self.target_sample_ids: Optional[List[str]] = None
 
     def parse_parcellation_structure(self, json_path: str) -> Dict[int, Dict[str, Union[str, int]]]:
         """
@@ -191,7 +176,9 @@ class Database:
             parcellation_info = self.parcellation_tree.get(row.parcellation_index, {})
             cell_id = row.cell_label
             sample_id = row.brain_section_label
-            cell = Cell(x=row.x_ccf, y=row.y_ccf, z=row.z_ccf, cell_id=cell_id,
+            if self.target_sample_ids is not None and sample_id not in self.target_sample_ids:
+                continue
+            cell = Cell(x=row.x, y=row.y, z=row.z, cell_id=cell_id,
                         parcellation_index=row.parcellation_index,
                         parcellation_level=parcellation_info.get('st_level', -1), sample_id=sample_id)
             if feature_name == 'gene_expression':
@@ -205,11 +192,21 @@ class Database:
                 sample = Sample(sample_id=sample_id)
                 sample.cells.append(cell)
                 self.samples[sample_id] = sample
+            if len(self.cells) % 10000 == 0:
+                logger.info(f"\t{len(self.cells)} cells loaded...")
         logger.info(f'Processed {len(self.cells)} cells and {len(self.samples.keys())} samples.')
 
         logger.info('Constructing adata for each sample...')
-        for sample in self.samples.values():
-            sample.construct_adata(adata_list)
+        for i, sample in enumerate(self.samples.values()):
+            sample.construct_adata()
+            if i > 0 and i % 20 == 0:
+                logger.info(f"\t{i} samples constructed...")
 
     def get_sample(self, sample_id: str) -> Optional[Sample]:
         return self.samples.get(sample_id, None)
+
+    def get_cell(self, cell_id: str) -> Optional[Cell]:
+        for cell in self.cells:
+            if cell.id == cell_id:
+                return cell
+        return None
