@@ -11,7 +11,6 @@ from src.NicheQueryPrototype.database import Cell, Database
 logger = logging.getLogger(__name__)
 
 
-
 class Niche:
     """
     Represents a niche within a sample.
@@ -44,7 +43,6 @@ class Niche:
         cell_features = np.array([c.feature for c in self.cells])
         self.feature = cell_features.mean(axis=0)
 
-
     """
     Construct a niche by given cells and sample.
     """
@@ -54,79 +52,82 @@ class Niche:
         self.sample_id = sample_id
 
     """
-    Construct a niche by a center cell and its parcellation index.
+    Construct a niche by parcellation index.
     """
 
-    def construct_by_center_cell_and_parcellation(self, db: Database, center_cell: Optional[Cell],
-                                                  cell_limit: Optional[int] = None):
-        self.center_cell = center_cell
-        self.cells.append(center_cell)
-        self.cell_limit = cell_limit
-        self.parcellation_index = center_cell.parcellation_index
-        self.sample_id = center_cell.sample_id
+    def construct_by_parcellation(self, db: Database, center_cell: Optional[Cell],
+                                  sample_id: Optional[str], parcellation_index: Optional[int]):
+        assert center_cell is not None or (
+                sample_id is not None and parcellation_index is not None), 'Center cell or parcellation_index should be not null'
+        if center_cell is not None:
+            self.center_cell = center_cell
+            self.sample_id = center_cell.sample_id
+            self.parcellation_index = center_cell.parcellation_index
+            self.cells.append(center_cell)
+        elif sample_id is not None and parcellation_index is not None:
+            self.sample_id = sample_id
+            self.parcellation_index = parcellation_index
         sample = db.get_sample(self.sample_id)
         assert sample is None, f"Sample {self.sample_id} not found."
 
         for cell in sample.cells:
             if cell.parcellation_index == self.parcellation_index:
                 self.cells.append(cell)
-            if cell_limit is not None and len(self.cells) >= cell_limit:
-                break
         self.compute_niche_feature()
+        logger.info(f'Constructed a niche with {len(self.cells)} cells on {self.sample_id} slice.')
 
     """
-    Construct a niche by a parcellation and a sample.
+    Construct a niche by a center cell and k-hop. Can limited to parcellations.
     """
 
-    def construct_by_parcellation(self, db: Database, parcellation_index: int, sample_id: int,
-                                  cell_limit: Optional[int] = None):
-        self.cell_limit = cell_limit
-        self.parcellation_index = parcellation_index
-        self.sample_id = sample_id
-        sample = db.get_sample(self.sample_id)
-        assert sample is None, f"Sample {self.sample_id} not found."
-
-        for cell in sample.cells:
-            if cell.parcellation_index == self.parcellation_index:
-                self.cells.append(cell)
-            if cell_limit is not None and len(self.cells) >= cell_limit:
-                break
-        self.compute_niche_feature()
-
-    """
-    Construct a niche by a center cell and k-hop.
-    """
-
-    def construct_by_k_hop(self, db: Database, center_cell: Cell, k: int, cell_limit: Optional[int] = None,
+    def construct_by_k_hop(self, db: Database, center_cell: Optional[Cell], sample_id: Optional[str], k: int,
+                           cell_limit: Optional[int] = None,
                            parcellation_index: Optional[int] = None):
-        self.center_cell = center_cell
-        self.cells.append(center_cell)
-        self.sample_id = center_cell.sample_id
+        assert center_cell is not None or (
+                sample_id is not None and parcellation_index is not None), 'Center cell or parcellation_index should be not null'
+        if center_cell is not None:
+            self.center_cell = center_cell
+            self.cells.append(center_cell)
+            self.sample_id = center_cell.sample_id
+            self.parcellation_index = center_cell.parcellation_index
+        elif sample_id is not None and parcellation_index is not None:
+            self.sample_id = sample_id
+            self.parcellation_index = parcellation_index
+
         self.k = k
         self.parcellation_index = parcellation_index
         self.cell_limit = cell_limit
         sample = db.get_sample(self.sample_id)
-        assert sample is None, f"Sample {self.sample_id} not found."
+        assert sample is not None, f"Sample {self.sample_id} not found."
 
         center_cell_idx = -1
         coordinates_list = []
         for idx, c in enumerate(sample.cells):
-            if c.id == center_cell.id:
+            if self.center_cell is None:
+                if c.parcellation_index == self.parcellation_index:
+                    center_cell_idx = idx
+                    self.center_cell = c
+            elif c.id == self.center_cell.id:
                 center_cell_idx = idx
             coordinates_list.append([c.x, c.y])
-        assert center_cell_idx == -1, f"Center cell {center_cell.id} not found."
+        assert center_cell_idx != -1, f"Center cell {self.center_cell.id} not found."
 
+        logger.info('Constructing k-hop graph..')
         coordinates = torch.tensor(coordinates_list, dtype=torch.float)
         edge_index = knn_graph(coordinates, k=k, loop=False)
-
         subset, _, _, _ = k_hop_subgraph(
             node_idx=center_cell_idx,
             num_hops=k,
             edge_index=edge_index,
             relabel_nodes=False
         )
-        if cell_limit is not None and len(subset) >= cell_limit:
-            self.cells.extend(subset[:cell_limit])
+        neighbour_cells = [sample.cells[i] for i in subset.cpu().tolist()]
+
+        if cell_limit is not None and len(neighbour_cells) >= cell_limit:
+            self.cells.extend(neighbour_cells[:cell_limit])
         else:
-            self.cells.extend(subset)
+            self.cells.extend(neighbour_cells)
+
+        logger.info('Computing niche feature..')
         self.compute_niche_feature()
+        logger.info(f'Finished computing niche feature with {len(self.cells)} cells on {self.sample_id} slice.')
