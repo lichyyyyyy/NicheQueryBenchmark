@@ -163,17 +163,31 @@ class NicheQuery:
     Perform a niche query task and visualize results using cosine similarity on given samples.
     """
 
-    def niche_query_visualization(self, search_samples: List[Sample]) -> None:
+    def niche_query_visualization(self, search_samples: List[Sample], show_target_niches: bool = False) -> None:
         self.generate_niche_features_and_parcellation_mask(search_samples)
         for sample in search_samples:
             self.niche_query_within_a_sample(sample)
             if 'niche_query_result' not in sample.adata.obs:
                 sample.adata.obs['niche_query_result'] = np.nan
+            target_cells = []
             for cell in sample.cells:
                 sample.adata.obs.loc[cell.id, 'niche_query_result'] = float(cell.similarity)
+                if cell.parcellation_index == self.niche.parcellation_index:
+                    target_cells.append(cell)
+            sample.adata.obs["target_niches"] = sample.adata.obs_names.isin([c.id for c in target_cells])
 
         fig, axes = plt.subplots(ncols=6, nrows=2, figsize=(16, 6))
         axes = axes.flatten()
         for i, sample in enumerate(search_samples):
             sc.pl.spatial(sample.adata, color='niche_query_result', ax=axes[i], show=False, spot_size=5,
                           title=f"{sample.id}")
+
+        if show_target_niches:
+            fig, axes = plt.subplots(ncols=6, nrows=2, figsize=(16, 6))
+            axes = axes.flatten()
+            for i, sample in enumerate(search_samples):
+                sc.pl.spatial(sample.adata, color='target_niches', ax=axes[i], show=False, spot_size=5,
+                              title=f"Target Niches ({sample.id})")
+            fig.suptitle("Target Niches", fontsize=18, y=1.02)  # y 可以微调位置
+            plt.tight_layout()
+

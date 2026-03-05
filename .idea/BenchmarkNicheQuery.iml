@@ -6,7 +6,7 @@
       <excludeFolder url="file://$MODULE_DIR$/notebook/DLPFC/data" />
       <excludeFolder url="file://$MODULE_DIR$/notebook/ccf" />
     </content>
-    <orderEntry type="jdk" jdkName="Python 3.10 (NicheQueryBenchmark)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="Python 3.10 (BenchmarkNicheQuery)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>
