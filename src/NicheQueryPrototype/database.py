@@ -1,6 +1,8 @@
+import datetime
 import json
 import logging
-from typing import Dict, Union
+import os
+from typing import Any, Dict, Union
 from typing import List, Optional
 
 import anndata as ad
@@ -24,7 +26,7 @@ class Cell:
             z: float,
             cell_id: str,
             parcellation_index: int,
-            parcellation_level: int,
+            parcellation_info: Dict[str, Union[str, int]],
             sample_id: str
     ):
         # Spatial coordinates
@@ -37,11 +39,13 @@ class Cell:
 
         # Parcellation information
         self.parcellation_index = parcellation_index
-        self.parcellation_level = parcellation_level
+        self.parcellation_info = parcellation_info
 
         # ID of the sample this cell belongs to
         self.sample_id = sample_id
-        self.feature:np.ndarray = None
+        # Gene expression vector (same genes as source AnnData .X); independent of query feature_name.
+        self.X: Optional[np.ndarray] = None
+        self.feature: Optional[np.ndarray] = None
 
         # The cosine similarity between this cell and the query cell.
         self.similarity: float = 0.0
@@ -70,15 +74,24 @@ class Sample:
     """
     Construct an adata from the source adata list.
     """
-    def construct_adata(self):
+
+    def construct_adata(self, var, require_features = False):
         cell_ids = [c.id for c in self.cells]
         if len(cell_ids) == 0:
             self.adata = None
             return
+
         obs = pd.DataFrame(index=pd.Index(cell_ids, name="cell_id"))
         coords = np.asarray([[c.x, c.y] for c in self.cells], dtype=float)
-        self.adata = ad.AnnData(X=None, obs=obs)
-        self.adata.obsm["X_spatial"] = coords
+
+        X = np.stack([c.X for c in self.cells], axis=0)  # shape: (n_cells, n_features)
+        self.adata = ad.AnnData(X=X, obs=obs, var=var)
+
+        if require_features:
+            self.adata.obs["X_feature"] = np.stack([c.feature for c in self.cells], axis=0)  # shape: (n_cells, n_features)
+        self.adata.obsm["spatial"] = coords
+        self.adata.obs["sample_id"] = self.id
+        self.adata.uns['library_id'] = self.id
 
 
 class Database:
@@ -91,14 +104,18 @@ class Database:
         self.samples: Dict[str, Sample] = {}
         self.merged_cell_metadata: pd.DataFrame = pd.DataFrame()
         self.parcellation_tree = {}
-        self.target_sample_ids: Optional[List[str]] = None
+        self.target_sample_ids: Optional[List[str]] = target_sample_ids
 
-    def parse_parcellation_structure(self, json_path: str) -> Dict[int, Dict[str, Union[str, int]]]:
+    def parse_parcellation_structure(self, json_path: str) -> Dict[int, Dict[str, Union[str, int, set[int]]]]:
         """
         Parse parcellation structure and return a dictionary:
 
         key: structure id
-        value: (parent_id, name, st_level)
+        value: {
+            "parent_ids": set[int],   # includes self
+            "name": str,
+            "st_level": int
+        }
         """
 
         with open(json_path, "r") as f:
@@ -106,30 +123,32 @@ class Database:
 
         result = {}
 
-        def traverse(node: dict):
-            """
-            Recursively traverse the tree and extract required fields.
-            """
-            structure_id = node["id"]
-            parent_id = node["parent_structure_id"]
-            name = node["name"]
-            st_level = node["st_level"]
+        def dfs(node, ancestors: set[int]) -> None:
+            node_id = int(node.get("id"))
+            st_level_raw = node.get("st_level")
+            st_level = int(st_level_raw) if st_level_raw is not None else None
+            name = node.get("name")
 
-            result[structure_id] = {
-                'parent_id': parent_id,
-                'name': name,
-                'st_level': st_level,
+            current_ancestors = set(ancestors)
+            current_ancestors.add(node_id)  # parent includes self
+
+            entry = {
+                "parent_ids": current_ancestors,
+                "name": name,
+                "st_level": st_level,
             }
 
-            # Recursively process children
+            result[node_id] = entry
+
             for child in node.get("children", []):
-                traverse(child)
+                dfs(child, current_ancestors)
 
         # Root is inside data["msg"]
         for root_node in data["msg"]:
-            traverse(root_node)
+            dfs(root_node, set())
 
         return result
+
 
     def get_cell_expression(self, adata_list: List[AnnData], cell_id: str) -> Optional[np.ndarray]:
         for adata in adata_list:
@@ -180,9 +199,10 @@ class Database:
                 continue
             cell = Cell(x=row.x, y=row.y, z=row.z, cell_id=cell_id,
                         parcellation_index=row.parcellation_index,
-                        parcellation_level=parcellation_info.get('st_level', -1), sample_id=sample_id)
+                        parcellation_info=parcellation_info, sample_id=sample_id)
+            cell.X = self.get_cell_expression(adata_list, cell_id)
             if feature_name == 'gene_expression':
-                cell.feature = self.get_cell_expression(adata_list, cell_id)
+                cell.feature = cell.X
             else:
                 cell.feature = self.get_cell_embedding(adata_list, cell_id, feature_name)
             self.cells.append(cell)
@@ -198,7 +218,7 @@ class Database:
 
         logger.info('Constructing adata for each sample...')
         for i, sample in enumerate(self.samples.values()):
-            sample.construct_adata()
+            sample.construct_adata(var=adata_list[0].var, require_features=(feature_name != 'gene_expression'))
             if i > 0 and i % 20 == 0:
                 logger.info(f"\t{i} samples constructed...")
 
@@ -210,3 +230,97 @@ class Database:
             if cell.id == cell_id:
                 return cell
         return None
+
+    def cell_matches_parcellation_or_ancestor(
+            self, cell: Cell, target_parcellation_index: int) -> bool:
+        """
+        True if the cell's parcellation is `target_parcellation_index`, or that
+        target appears on the cell's path in the CCF tree (i.e. in
+        ``parcellation_info['parent_ids']``, which includes the node's own id).
+        """
+        if cell.parcellation_index == target_parcellation_index:
+            return True
+        info = cell.parcellation_info or {}
+        parent_ids = info.get("parent_ids")
+        if not parent_ids:
+            return False
+        return target_parcellation_index in parent_ids
+
+    def visualize_parcellation_cells(
+            self,
+            sample_id: str,
+            target_parcellation_index: int,
+            obs_key: str = "target_parcellation",
+            spot_size: float = 5,
+            show: Optional[bool] = None,
+            print_metadata: bool = False,
+            **kwargs: Any,
+    ):
+        """
+        On the sample's ``AnnData``, highlight cells whose parcellation equals
+        ``target_parcellation_index`` or lies under that structure in the tree
+        (same rule as ``parent_ids`` in :meth:`parse_parcellation_structure`).
+
+        Parameters
+        ----------
+        sample_id
+            Brain section / sample id.
+        target_parcellation_index
+            CCF structure id to query.
+        obs_key
+            Column written to ``adata.obs`` for plotting.
+        print_metadata
+            If True, print each highlighted cell's ``cell_id``, ``x``, ``y``,
+            and ``parcellation_index``.
+        spot_size, show, **kwargs
+            Passed to :func:`scanpy.pl.spatial` (``show`` defaults to
+            :obj:`True` when omitted).
+        """
+        sample = self.get_sample(sample_id)
+        if sample is None:
+            raise ValueError(f"Sample {sample_id!r} not found.")
+        if sample.adata is None:
+            raise ValueError(
+                f"Sample {sample_id!r} has no AnnData; construct the database first."
+            )
+        matched_cells = [
+            c for c in sample.cells
+            if self.cell_matches_parcellation_or_ancestor(c, target_parcellation_index)
+        ]
+        matched_ids = {c.id for c in matched_cells}
+        if print_metadata:
+            print(
+                f"Highlighted cells (n={len(matched_cells)}) for parcellation "
+                f"{target_parcellation_index} in sample {sample_id!r}:"
+            )
+            for c in matched_cells:
+                print(
+                    f"  cell_id={c.id!r}  x={c.x}  y={c.y}  "
+                    f"parcellation_index={c.parcellation_index}"
+                )
+        adata = sample.adata
+        adata.obs[obs_key] = adata.obs_names.isin(matched_ids)
+        if show is None:
+            show = True
+        sc.pl.spatial(
+            adata,
+            color=obs_key,
+            palette=["lightgrey", "red"],
+            spot_size=spot_size,
+            title=f"Parcellation {target_parcellation_index} (self or subtree) | {sample.id}",
+            show=show,
+            **kwargs,
+        )
+
+    """
+    Export adata for `target_sample_ids` if not null; otherwise, export all samples. One sample per file.
+    """
+
+    def export_sample_adata(self, export_dir: str):
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        dir = os.path.join(export_dir, timestamp)
+        os.makedirs(dir, exist_ok=True)
+        for sample in self.samples.values():
+            filename = f"{dir}/{sample.id}.h5ad"
+            sample.adata.write(filename)
+            logging.info(f"Exported {filename}")

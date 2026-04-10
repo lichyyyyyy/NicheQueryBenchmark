@@ -126,7 +126,10 @@ class Niche:
         if parcellation_index is not None:
             neighbour_cells = [sample.cells[i] for i in subset.cpu().tolist() ]
         else:
-            neighbour_cells = [sample.cells[i] for i in subset.cpu().tolist() if sample.cells[i].parcellation_index == self.parcellation_index]
+            neighbour_cells = [
+                sample.cells[i] for i in subset.cpu().tolist()
+                if db.cell_matches_parcellation_or_ancestor(sample.cells[i], self.parcellation_index)
+            ]
 
         if cell_limit is not None and len(neighbour_cells) >= cell_limit:
             self.cells.extend(neighbour_cells[:(cell_limit-1)])
@@ -145,9 +148,3 @@ class Niche:
             color="niche_to_query",
             palette=["lightgrey", "red"],  # False, True
             spot_size=5,title=f"Niche to Query ({sample.id})")
-        sample.adata.obs["target_parcellation"] = sample.adata.obs_names.isin([c.id for c in sample.cells if c.parcellation_index == self.parcellation_index])
-        sc.pl.spatial(
-            sample.adata,
-            color="target_parcellation",
-            palette=["lightgrey", "red"],  # False, True
-            spot_size=5,title=f"Target Parcellation Section ({sample.id})")
