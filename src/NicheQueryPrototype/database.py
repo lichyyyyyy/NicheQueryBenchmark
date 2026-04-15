@@ -23,6 +23,9 @@ from matplotlib.axes import Axes
 
 logger = logging.getLogger(__name__)
 
+# Chunk size for filtering large CSVs when ``target_sample_ids`` is set.
+_METADATA_CSV_CHUNKSIZE = 500_000
+
 
 class Cell:
     """
@@ -266,12 +269,23 @@ class Database:
 
         return result
 
+    @staticmethod
+    def _row_to_1d_numpy(x: Any) -> np.ndarray:
+        """
+        AnnData row slices may be dense ndarray, ``np.matrix``, scipy sparse,
+        or sparse *views* without ``.squeeze()`` — normalize to shape ``(n_features,)``.
+        """
+        if hasattr(x, "toarray") and callable(getattr(x, "toarray", None)):
+            x = x.toarray()
+        arr = np.asarray(x)
+        return np.reshape(arr, (-1,))
+
     def get_cell_expression(
         self, adata_list: List[AnnData], cell_id: str
     ) -> Optional[np.ndarray]:
         for adata in adata_list:
             if cell_id in adata.obs.index:
-                return adata[cell_id, :].X.squeeze()
+                return self._row_to_1d_numpy(adata[cell_id, :].X)
         return None
 
     def get_cell_embedding(
@@ -279,7 +293,9 @@ class Database:
     ) -> Optional[np.ndarray]:
         for adata in adata_list:
             if embedding_key in adata.obsm.keys() and cell_id in adata.obs.index:
-                return adata[cell_id, :].obsm[embedding_key].squeeze()
+                return self._row_to_1d_numpy(
+                    adata[cell_id, :].obsm[embedding_key]
+                )
         return None
 
     """
@@ -296,20 +312,64 @@ class Database:
         feature_name: str,
         parcellation_path: Optional[str],
     ):
-        # step 1: load data from source
-        logger.info("Loading adata...")
-        cell_metadata_list, ccf_coordinates_list, adata_list = [], [], []
-        for path in adata_path:
-            adata_list.append(sc.read(path))
+        target_set = (
+            set(self.target_sample_ids) if self.target_sample_ids is not None else None
+        )
 
+        def _read_cell_metadata_csv(path: str) -> pd.DataFrame:
+            if target_set is None:
+                return pd.read_csv(path)
+            parts: List[pd.DataFrame] = []
+            for chunk in pd.read_csv(path, chunksize=_METADATA_CSV_CHUNKSIZE):
+                if "brain_section_label" not in chunk.columns:
+                    raise KeyError(
+                        f"{path!r} is missing column 'brain_section_label', "
+                        "required when ``target_sample_ids`` is set."
+                    )
+                sub = chunk[chunk["brain_section_label"].isin(target_set)]
+                if not sub.empty:
+                    parts.append(sub)
+            if not parts:
+                return pd.DataFrame()
+            return pd.concat(parts, axis=0, ignore_index=True)
+
+        def _read_ccf_csv(path: str, allowed_cell_labels: set) -> pd.DataFrame:
+            if target_set is None:
+                return pd.read_csv(path)
+            parts: List[pd.DataFrame] = []
+            for chunk in pd.read_csv(path, chunksize=_METADATA_CSV_CHUNKSIZE):
+                sub = chunk[chunk["cell_label"].isin(allowed_cell_labels)]
+                if not sub.empty:
+                    parts.append(sub)
+            if not parts:
+                return pd.DataFrame()
+            return pd.concat(parts, axis=0, ignore_index=True)
+
+        # step 1: load tabular data first, then AnnData (often one file with all cells).
         logger.info("Loading cell metadata...")
+        cell_metadata_list: List[pd.DataFrame] = []
         for path in cell_metadata_path:
-            cell_metadata_list.append(pd.read_csv(path))
-        for path in ccf_coordinates_path:
-            ccf_coordinates_list.append(pd.read_csv(path))
+            cell_metadata_list.append(_read_cell_metadata_csv(path))
         cell_metadata = pd.concat(cell_metadata_list, axis=0, ignore_index=True)
-        ccf_coordinates = pd.concat(ccf_coordinates_list, axis=0, ignore_index=True)
         cell_metadata.drop_duplicates(subset=["cell_label"], inplace=True)
+
+        if target_set is not None and cell_metadata.empty:
+            raise ValueError(
+                "No rows left after filtering cell metadata by ``target_sample_ids``. "
+                "Check that ``brain_section_label`` values match the ids you passed."
+            )
+
+        allowed_cell_labels = (
+            set(cell_metadata["cell_label"]) if target_set is not None else None
+        )
+        logger.info("Loading CCF coordinates...")
+        ccf_coordinates_list: List[pd.DataFrame] = []
+        for path in ccf_coordinates_path:
+            if allowed_cell_labels is not None:
+                ccf_coordinates_list.append(_read_ccf_csv(path, allowed_cell_labels))
+            else:
+                ccf_coordinates_list.append(pd.read_csv(path))
+        ccf_coordinates = pd.concat(ccf_coordinates_list, axis=0, ignore_index=True)
         ccf_coordinates.drop_duplicates(subset=["cell_label"], inplace=True)
         self.merged_cell_metadata = pd.merge(
             cell_metadata, ccf_coordinates, on="cell_label", suffixes=("", "_ccf")
@@ -317,17 +377,36 @@ class Database:
         logger.info("Constructing parcellation tree...")
         self.parcellation_tree = self.parse_parcellation_structure(parcellation_path)
 
+        logger.info("Loading AnnData...")
+        adata_list: List[AnnData] = []
+        for path in adata_path:
+            ad = sc.read(path)
+            if allowed_cell_labels is not None:
+                keep = ad.obs_names.isin(allowed_cell_labels)
+                n_before = int(ad.n_obs)
+                n_keep = int(keep.sum())
+                if n_keep == 0:
+                    logger.error(
+                        f"No overlap between AnnData obs index and filtered cell_metadata "
+                        f"``cell_label`` for {path!r} (n_obs={n_before}). "
+                        f"Ensure ``adata.obs_names`` match ``cell_label`` (same dtype/format)."
+                    )
+                    continue
+                ad = ad[keep]
+                logger.info(
+                    "Subset %r to %d / %d cells (from ``target_sample_ids`` metadata).",
+                    os.path.basename(path),
+                    n_keep,
+                    n_before,
+                )
+            adata_list.append(ad)
+
         # step 2: construct cells and samples
         logger.info("Constructing database for niche query...")
         for row in self.merged_cell_metadata.itertuples(index=False):
             parcellation_info = self.parcellation_tree.get(row.parcellation_index, {})
             cell_id = row.cell_label
             sample_id = row.brain_section_label
-            if (
-                self.target_sample_ids is not None
-                and sample_id not in self.target_sample_ids
-            ):
-                continue
             cell = Cell(
                 x=row.x,
                 y=row.y,

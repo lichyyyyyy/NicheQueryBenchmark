@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.spatial.distance import jensenshannon
@@ -27,6 +27,33 @@ from src.NicheQueryPrototype.database import (
 )
 import scanpy as sc
 from src.NicheQueryPrototype.niche import Niche, logger
+
+
+def _spatial_viz_figure(
+    n_panels: int,
+    *,
+    max_cols: int = 6,
+    panel_width_in: float = 2.75,
+    panel_height_in: float = 2.75,
+) -> Tuple[Any, np.ndarray]:
+    """
+    One matplotlib figure with a flat ``axes`` array for ``n_panels`` spatial plots.
+    Unused axes are turned off. Figure size grows with ``nrows`` / ``ncols`` so the
+    overall canvas stays roughly rectangular per panel (not a fixed 6×2 grid).
+    """
+    n_panels = max(1, int(n_panels))
+    ncols = min(max_cols, n_panels)
+    nrows = int(np.ceil(n_panels / ncols))
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(panel_width_in * ncols, panel_height_in * nrows),
+        squeeze=False,
+    )
+    axes_flat = np.asarray(axes).ravel()
+    for j in range(n_panels, len(axes_flat)):
+        axes_flat[j].set_axis_off()
+    return fig, axes_flat
 
 
 def _append_result_txt(path: Optional[str], text: str) -> None:
@@ -455,6 +482,9 @@ class NicheQuery:
         search_samples: List[Sample],
         show_target_niches: bool = False,
         spot_size: float = 0.02,
+        *,
+        viz_max_cols: int = 6,
+        viz_panel_size_in: Tuple[float, float] = (2.75, 2.75),
     ) -> None:
         self.generate_niche_features_and_parcellation_mask(search_samples)
         for sample in search_samples:
@@ -474,8 +504,14 @@ class NicheQuery:
                 [c.id for c in target_cells]
             )
 
-        fig, axes = plt.subplots(ncols=6, nrows=2, figsize=(16, 6))
-        axes = axes.flatten()
+        n = len(search_samples)
+        pw, ph = viz_panel_size_in
+        fig, axes = _spatial_viz_figure(
+            n,
+            max_cols=viz_max_cols,
+            panel_width_in=pw,
+            panel_height_in=ph,
+        )
         for i, sample in enumerate(search_samples):
             sc.pl.spatial(
                 sample.adata,
@@ -485,10 +521,16 @@ class NicheQuery:
                 spot_size=spot_size,
                 title=f"Niche query\n{sample.id}",
             )
+        fig.suptitle("Niche query", fontsize=18)
+        plt.tight_layout()
 
         if show_target_niches:
-            fig, axes = plt.subplots(ncols=6, nrows=2, figsize=(16, 6))
-            axes = axes.flatten()
+            fig, axes = _spatial_viz_figure(
+                n,
+                max_cols=viz_max_cols,
+                panel_width_in=pw,
+                panel_height_in=ph,
+            )
             for i, sample in enumerate(search_samples):
                 sc.pl.spatial(
                     sample.adata,
