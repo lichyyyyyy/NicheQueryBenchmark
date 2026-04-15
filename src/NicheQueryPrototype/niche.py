@@ -1,4 +1,3 @@
-
 import logging
 from typing import List, Optional
 
@@ -19,13 +18,13 @@ class Niche:
     """
 
     def __init__(
-            self,
+        self,
     ):
         # [Required] List of cells that belong to this niche
         self.cells = []
 
         # [Required] ID of the sample this niche belongs to
-        self.sample_id = ''
+        self.sample_id = ""
 
         # Neighborhood size parameter
         self.k = 0
@@ -41,7 +40,7 @@ class Niche:
         self.feature = None
 
     def compute_niche_feature(self):
-        assert len(self.cells) > 0, 'Empty cells in the niche'
+        assert len(self.cells) > 0, "Empty cells in the niche"
         cell_features = np.array([c.feature.squeeze() for c in self.cells])
         self.feature = cell_features.mean(axis=0)
 
@@ -57,10 +56,16 @@ class Niche:
     Construct a niche by parcellation index.
     """
 
-    def construct_by_parcellation(self, db: Database, center_cell: Optional[Cell],
-                                  sample_id: Optional[str], parcellation_index: Optional[int]):
+    def construct_by_parcellation(
+        self,
+        db: Database,
+        center_cell: Optional[Cell],
+        sample_id: Optional[str],
+        parcellation_index: Optional[int],
+    ):
         assert center_cell is not None or (
-                sample_id is not None and parcellation_index is not None), 'Center cell or parcellation_index should be not null'
+            sample_id is not None and parcellation_index is not None
+        ), "Center cell or parcellation_index should be not null"
         if center_cell is not None:
             self.center_cell = center_cell
             self.sample_id = center_cell.sample_id
@@ -76,17 +81,28 @@ class Niche:
             if cell.parcellation_index == self.parcellation_index:
                 self.cells.append(cell)
         self.compute_niche_feature()
-        logger.info(f'Constructed a niche with {len(self.cells)} cells on {self.sample_id} slice.')
+        logger.info(
+            f"Constructed a niche with {len(self.cells)} cells on {self.sample_id} slice."
+        )
 
     """
     Construct a niche by a center cell and k-hop. Can limited to parcellations.
     """
 
-    def construct_by_k_hop(self, db: Database, center_cell_id: Optional[str], sample_id: Optional[str], k: int,
-                           cell_limit: Optional[int] = None,
-                           parcellation_index: Optional[int] = None):
-        assert (center_cell_id is not None and db.get_cell(center_cell_id) is not None) or (
-                sample_id is not None and parcellation_index is not None), 'Center cell or parcellation_index should be not null'
+    def construct_by_k_hop(
+        self,
+        db: Database,
+        center_cell_id: Optional[str],
+        sample_id: Optional[str],
+        k: int,
+        cell_limit: Optional[int] = None,
+        parcellation_index: Optional[int] = None,
+    ):
+        assert (
+            center_cell_id is not None and db.get_cell(center_cell_id) is not None
+        ) or (
+            sample_id is not None and parcellation_index is not None
+        ), "Center cell or parcellation_index should be not null"
         if center_cell_id is not None and db.get_cell(center_cell_id) is not None:
             self.center_cell = db.get_cell(center_cell_id)
             self.cells.append(self.center_cell)
@@ -114,37 +130,48 @@ class Niche:
             coordinates_list.append([c.x, c.y])
         assert center_cell_idx != -1, f"Center cell {self.center_cell.id} not found."
 
-        logger.info('Constructing k-hop graph..')
+        logger.info("Constructing k-hop graph..")
         coordinates = torch.tensor(coordinates_list, dtype=torch.float)
         edge_index = knn_graph(coordinates, k=k, loop=False)
         subset, _, _, _ = k_hop_subgraph(
             node_idx=center_cell_idx,
             num_hops=k,
             edge_index=edge_index,
-            relabel_nodes=False
+            relabel_nodes=False,
         )
-        if parcellation_index is not None:
-            neighbour_cells = [sample.cells[i] for i in subset.cpu().tolist() ]
+        if parcellation_index is None:
+            neighbour_cells = [sample.cells[i] for i in subset.cpu().tolist()]
         else:
             neighbour_cells = [
-                sample.cells[i] for i in subset.cpu().tolist()
-                if db.cell_matches_parcellation_or_ancestor(sample.cells[i], self.parcellation_index)
+                sample.cells[i]
+                for i in subset.cpu().tolist()
+                if db.cell_matches_parcellation_or_ancestor(
+                    sample.cells[i], self.parcellation_index
+                )
             ]
 
         if cell_limit is not None and len(neighbour_cells) >= cell_limit:
-            self.cells.extend(neighbour_cells[:(cell_limit-1)])
+            self.cells.extend(neighbour_cells[: (cell_limit - 1)])
         else:
             self.cells.extend(neighbour_cells)
 
-        logger.info('Computing niche feature..')
+        logger.info("Computing niche feature..")
         self.compute_niche_feature()
-        logger.info(f'Finished computing niche feature with {len(self.cells)} cells on {self.sample_id} slice.')
+        logger.info(
+            f"Finished computing niche feature with {len(self.cells)} cells on {self.sample_id} slice."
+        )
 
-    def visualize(self, db: Database):
+    def visualize(self, db: Database, spot_size: float = 0.02):
+        n_cells = len(self.cells)
+        logger.info(f"Niche contains {n_cells} cell(s) (sample_id={self.sample_id!r})")
         sample = db.get_sample(self.sample_id)
-        sample.adata.obs["niche_to_query"] = sample.adata.obs_names.isin([c.id for c in self.cells])
+        sample.adata.obs["niche_to_query"] = sample.adata.obs_names.isin(
+            [c.id for c in self.cells]
+        )
         sc.pl.spatial(
             sample.adata,
             color="niche_to_query",
             palette=["lightgrey", "red"],  # False, True
-            spot_size=5,title=f"Niche to Query ({sample.id})")
+            spot_size=spot_size,
+            title=f"Niche to Query ({sample.id})",
+        )
