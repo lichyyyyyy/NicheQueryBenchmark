@@ -5,6 +5,14 @@ import os
 from typing import Any, Dict, Union
 from typing import List, Optional
 
+# Import torch before anndata. anndata pulls ``anndata.experimental.pytorch``, which
+# imports torch; initializing torch from inside that chain can trigger duplicate
+# ``TORCH_LIBRARY`` registration in Jupyter (e.g. after autoreload or a failed import).
+try:
+    import torch  # noqa: F401
+except ImportError:
+    pass
+
 import anndata as ad
 import matplotlib.pyplot as plt
 import numpy as np
