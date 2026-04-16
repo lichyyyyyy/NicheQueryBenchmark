@@ -433,10 +433,44 @@ class Database:
             f"Processed {len(self.cells)} cells and {len(self.samples.keys())} samples."
         )
 
+        # Different source .h5ad files can carry different numbers of genes.
+        # Build a lookup so each sample gets a `var` aligned to its own `X` width.
+        var_by_n_vars: Dict[int, pd.DataFrame] = {}
+        for adata in adata_list:
+            if adata.n_vars not in var_by_n_vars:
+                var_by_n_vars[int(adata.n_vars)] = adata.var.copy(deep=False)
+
         logger.info("Constructing adata for each sample...")
         for i, sample in enumerate(self.samples.values()):
+            sample_n_vars: Optional[int] = None
+            for c in sample.cells:
+                if c.X is not None:
+                    sample_n_vars = int(np.asarray(c.X).reshape(-1).shape[0])
+                    break
+
+            sample_var = None
+            if sample_n_vars is not None:
+                sample_var = var_by_n_vars.get(sample_n_vars)
+                if sample_var is None:
+                    logger.warning(
+                        "No source `var` found with n_vars=%d for sample %r; using placeholder feature ids.",
+                        sample_n_vars,
+                        sample.id,
+                    )
+                    sample_var = pd.DataFrame(
+                        index=pd.Index(
+                            [f"feature_{j}" for j in range(sample_n_vars)],
+                            name="feature_id",
+                        )
+                    )
+            elif var_by_n_vars:
+                # Fallback for feature-only workflows without gene expression vectors.
+                sample_var = next(iter(var_by_n_vars.values()))
+            else:
+                sample_var = pd.DataFrame()
+
             sample.construct_adata(
-                var=adata_list[0].var,
+                var=sample_var,
                 require_features=(feature_name != "gene_expression"),
             )
             if i > 0 and i % 20 == 0:
