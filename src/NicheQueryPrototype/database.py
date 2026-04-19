@@ -118,16 +118,37 @@ class Sample:
         if require_features:
             self.adata = ad.AnnData(obs=obs, var=var)
         else:
-            X = np.stack(
-                [c.X for c in self.cells], axis=0
-            )  # shape: (n_cells, n_features)
+            n_cells = len(self.cells)
+            rows = [c.X for c in self.cells]
+            if any(r is None for r in rows):
+                bad = sum(1 for r in rows if r is None)
+                raise ValueError(
+                    f"Sample {self.id!r}: {bad}/{n_cells} cells have no expression vector "
+                    "(cell.X is None); cannot build dense X."
+                )
+            # Pre-allocate instead of np.stack: lower peak RAM and faster for large n_cells.
+            first = np.asarray(rows[0]).reshape(-1)
+            X = np.empty((n_cells, first.shape[0]), dtype=first.dtype)
+            X[0] = first
+            for i in range(1, n_cells):
+                X[i] = np.asarray(rows[i]).reshape(-1)
             self.adata = ad.AnnData(X=X, obs=obs, var=var)
 
         if require_features:
             # Multi-dimensional embeddings belong in obsm, not obs (pandas columns are 1D).
-            self.adata.obsm["X_feature"] = np.stack(
-                [c.feature for c in self.cells], axis=0
-            )
+            feats = [c.feature for c in self.cells]
+            if any(f is None for f in feats):
+                bad = sum(1 for f in feats if f is None)
+                raise ValueError(
+                    f"Sample {self.id!r}: {bad}/{len(feats)} cells have no feature vector "
+                    "(cell.feature is None); cannot build obsm['X_feature']."
+                )
+            first_f = np.asarray(feats[0]).reshape(-1)
+            F = np.empty((len(feats), first_f.shape[0]), dtype=first_f.dtype)
+            F[0] = first_f
+            for i in range(1, len(feats)):
+                F[i] = np.asarray(feats[i]).reshape(-1)
+            self.adata.obsm["X_feature"] = F
         self.adata.obsm["spatial"] = coords
         self.adata.obs["sample_id"] = self.id
         self.adata.uns["library_id"] = self.id
@@ -401,6 +422,21 @@ class Database:
                 )
             adata_list.append(ad)
 
+        if feature_name == "gene_expression" and adata_list:
+            name_sets = [set(ad.var_names.astype(str)) for ad in adata_list]
+            common_genes = sorted(set.intersection(*name_sets))
+            if not common_genes:
+                raise ValueError(
+                    "No overlapping gene names across AnnData objects. "
+                    "Cannot align ``gene_expression`` features."
+                )
+            logger.info(
+                "Gene expression: using %d common genes across %d AnnData file(s).",
+                len(common_genes),
+                len(adata_list),
+            )
+            adata_list = [ad[:, common_genes].copy() for ad in adata_list]
+
         # step 2: construct cells and samples
         logger.info("Constructing database for niche query...")
         for row in self.merged_cell_metadata.itertuples(index=False):
@@ -433,6 +469,18 @@ class Database:
             f"Processed {len(self.cells)} cells and {len(self.samples.keys())} samples."
         )
 
+        if feature_name != "gene_expression":
+            feat_dims: set = set()
+            for c in self.cells:
+                if c.feature is not None:
+                    feat_dims.add(int(np.asarray(c.feature).reshape(-1).shape[0]))
+            if len(feat_dims) > 1:
+                raise ValueError(
+                    "Inconsistent embedding dimensions across cells for "
+                    f"feature_name={feature_name!r}: found sizes {sorted(feat_dims)}. "
+                    "All cells must share the same embedding width."
+                )
+
         # Different source .h5ad files can carry different numbers of genes.
         # Build a lookup so each sample gets a `var` aligned to its own `X` width.
         var_by_n_vars: Dict[int, pd.DataFrame] = {}
@@ -440,8 +488,31 @@ class Database:
             if adata.n_vars not in var_by_n_vars:
                 var_by_n_vars[int(adata.n_vars)] = adata.var.copy(deep=False)
 
-        logger.info("Constructing adata for each sample...")
+        n_samples = len(self.samples)
+        logger.info(
+            "Constructing adata for each sample (%d total; this can take a while if "
+            "samples are large — memory is proportional to n_cells × n_features per sample)...",
+            n_samples,
+        )
         for i, sample in enumerate(self.samples.values()):
+            n_cells_s = len(sample.cells)
+            # Avoid a long silent stretch on the first huge sample(s).
+            _stride = 25 if n_samples > 60 else (10 if n_samples > 20 else 1)
+            _verbose = (
+                n_samples <= 30
+                or i < 3
+                or i == n_samples - 1
+                or (i + 1) % _stride == 0
+            )
+            if _verbose:
+                logger.info(
+                    "  [%d/%d] sample %r: %d cells — building AnnData...",
+                    i + 1,
+                    n_samples,
+                    sample.id,
+                    n_cells_s,
+                )
+
             sample_n_vars: Optional[int] = None
             for c in sample.cells:
                 if c.X is not None:
@@ -473,8 +544,13 @@ class Database:
                 var=sample_var,
                 require_features=(feature_name != "gene_expression"),
             )
-            if i > 0 and i % 20 == 0:
-                logger.info(f"\t{i} samples constructed...")
+            if _verbose:
+                logger.info(
+                    "  [%d/%d] sample %r: done.",
+                    i + 1,
+                    n_samples,
+                    sample.id,
+                )
 
     def get_sample(self, sample_id: str) -> Optional[Sample]:
         return self.samples.get(sample_id, None)

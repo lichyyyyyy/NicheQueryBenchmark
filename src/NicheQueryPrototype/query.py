@@ -234,6 +234,8 @@ class NicheQuery:
 
             return A_norm
 
+        niche_dim = int(np.asarray(self.niche.feature).reshape(-1).shape[0])
+
         for sample in samples:
             logger.info(
                 f"[START] start computing niche features for sample {sample.id}"
@@ -253,6 +255,11 @@ class NicheQuery:
             )
             if X_np.ndim != 2:
                 X_np = X_np.reshape(X_np.shape[0], -1)
+            if X_np.shape[1] != niche_dim:
+                raise ValueError(
+                    f"Sample {sample.id!r}: cell feature width {X_np.shape[1]} does not "
+                    f"match query niche feature width {niche_dim}."
+                )
 
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             X = torch.from_numpy(X_np).to(device=device, dtype=torch.float32)
@@ -278,6 +285,14 @@ class NicheQuery:
     """
 
     def niche_query_within_a_sample(self, sample: Sample) -> np.ndarray:
+        q = int(np.asarray(self.niche.feature).reshape(-1).shape[0])
+        sf = sample.niche_features.shape[1]
+        if q != sf:
+            raise ValueError(
+                f"Query niche feature width ({q}) != sample niche_features width ({sf}) "
+                f"for sample {sample.id!r}. Rebuild the database with aligned features, "
+                f"or run generate_niche_features_and_parcellation_mask with overwrite=True."
+            )
         cos_sim = cosine_similarity(
             self.niche.feature.reshape(1, -1), sample.niche_features
         ).squeeze()
@@ -350,7 +365,6 @@ class NicheQuery:
 
     def niche_query_with_benchmark_metrics_report(
         self,
-        best_threshold: float,
         samples: List[Sample],
         *,
         # NCJS: spatial k on (x,y) to build per-cell parcellation histogram P_i (see _niche_composition_matrix).
@@ -360,13 +374,18 @@ class NicheQuery:
         # AvgBATCH: k for embedding kNN batch-mixing fraction (paired with (1−ASW_batch)/2 in _avg_bio_batch).
         batch_k_neighbors: int = 15,
         result_txt_path: Optional[str] = None,
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Any]:
         """
         Like ``niche_query_with_classification_report``, but log and return retrieval /
         embedding benchmark metrics: AUPRC, PCC (Pearson r between cosine score and
         target mask), average NCJS (QueST-style composition JS on spatial niches vs
         embedding kNN), AvgBIO (mean of ARI, NMI, ASW w.r.t. parcellation), and
         AvgBATCH (mean of ``(1 - ASW_batch)/2`` and kNN batch-mixing; needs >=2 batches).
+
+        Returns a dict with ``total`` (pooled over all cells / samples) and
+        ``per_sample`` (same keys per sample; batch metrics are only defined on the
+        pooled embedding, so per-sample ``avg_batch`` is typically NaN). Per-sample
+        NCJS uses the same global ``n_bins`` as the pooled composition matrix.
 
         Requires ``generate_niche_features_and_parcellation_mask`` to have been run
         so each sample has ``niche_features`` and ``target_parcellation_mask``.
@@ -410,21 +429,70 @@ class NicheQuery:
             emb, bio_labels, batch_enc, batch_k_neighbors
         )
 
-        metrics: Dict[str, float] = {
+        total: Dict[str, float] = {
             "auprc": auprc,
             "pcc": pcc,
             "avg_ncjs": avg_ncjs,
             "avg_bio": avg_bio,
             "avg_batch": avg_batch,
         }
+
+        per_sample: List[Dict[str, Any]] = []
+        for i, s in enumerate(samples):
+            tpm = s.target_parcellation_mask
+            y_score_s = cos_sim_list[i]
+            if tpm is not None:
+                yt = tpm.astype(int)
+                if len(np.unique(yt)) >= 2:
+                    auprc_s = float(average_precision_score(yt, y_score_s))
+                    pcc_s = float(np.corrcoef(yt.astype(np.float64), y_score_s)[0, 1])
+                else:
+                    auprc_s = float("nan")
+                    pcc_s = float("nan")
+            else:
+                auprc_s = float("nan")
+                pcc_s = float("nan")
+
+            emb_s = s.niche_features
+            assert emb_s is not None
+            P_s = _niche_composition_matrix([s], ncjs_k_spatial, n_bins)
+            avg_ncjs_s = _average_ncjs_score(P_s, emb_s, ncjs_k_embedding)
+
+            bio_s = np.array([c.parcellation_index for c in s.cells], dtype=int)
+            batch_s = np.zeros(len(s.cells), dtype=int)
+            avg_bio_s, avg_batch_s = _avg_bio_batch(
+                emb_s, bio_s, batch_s, batch_k_neighbors
+            )
+
+            per_sample.append(
+                {
+                    "sample_id": s.id,
+                    "auprc": auprc_s,
+                    "pcc": pcc_s,
+                    "avg_ncjs": avg_ncjs_s,
+                    "avg_bio": avg_bio_s,
+                    "avg_batch": avg_batch_s,
+                }
+            )
+
+        out: Dict[str, Any] = {"total": total, "per_sample": per_sample}
+
         bench_msg = (
-            f"Benchmark metrics ({len(samples)} samples, threshold={best_threshold}): "
+            f"Benchmark metrics ({len(samples)} samples) [total]: "
             f"AUPRC={auprc:.4f}, PCC={pcc:.4f}, avg_NCJS={avg_ncjs:.4f}, "
             f"AvgBIO={avg_bio:.4f}, AvgBATCH={avg_batch:.4f}"
         )
         logger.info(bench_msg)
         _append_result_txt(result_txt_path, bench_msg + "\n")
-        return metrics
+        for row in per_sample:
+            line = (
+                f"  [{row['sample_id']}] AUPRC={row['auprc']:.4f}, PCC={row['pcc']:.4f}, "
+                f"avg_NCJS={row['avg_ncjs']:.4f}, AvgBIO={row['avg_bio']:.4f}, "
+                f"AvgBATCH={row['avg_batch']:.4f}"
+            )
+            logger.info(line)
+            _append_result_txt(result_txt_path, line + "\n")
+        return out
 
     """
     Perform niche query task, find best threshold, classification report, and benchmark metrics.
@@ -444,34 +512,34 @@ class NicheQuery:
         # AvgBATCH: k for kNN batch-mixing (passed to benchmark report).
         batch_k_neighbors: int = 15,
         result_txt_path: Optional[str] = None,
-    ) -> Dict[str, float]:
+    ) -> List[Dict[str, Any]]:
         self.generate_niche_features_and_parcellation_mask(search_samples)
-        target_samples_ = [
-            s for s in search_samples if s.target_parcellation_mask.sum() > 0
-        ]
-        non_target_samples = [
-            s for s in search_samples if s.target_parcellation_mask.sum() == 0
-        ]
-        val_samples, test_samples = train_test_split(
-            target_samples_, test_size=0.7, random_state=42, shuffle=True
-        )
-        best_threshold, _ = self.get_best_threshold(val_samples)
+        # target_samples_ = [
+        #     s for s in search_samples if s.target_parcellation_mask.sum() > 0
+        # ]
+        # non_target_samples = [
+        #     s for s in search_samples if s.target_parcellation_mask.sum() == 0
+        # ]
+        # val_samples, test_samples = train_test_split(
+        #     target_samples_, test_size=0.7, random_state=42, shuffle=True
+        # )
+        # best_threshold, _ = self.get_best_threshold(val_samples)
 
-        all_test_samples = list(test_samples) + list(non_target_samples)
-        np.random.shuffle(all_test_samples)
-        self.niche_query_with_classification_report(
-            best_threshold,
-            all_test_samples,
-            result_txt_path=result_txt_path,
-        )
-        return self.niche_query_with_benchmark_metrics_report(
-            best_threshold,
-            all_test_samples,
+        # all_test_samples = list(test_samples) + list(non_target_samples)
+        # np.random.shuffle(all_test_samples)
+        # self.niche_query_with_classification_report(
+        #     best_threshold,
+        #     all_test_samples,
+        #     result_txt_path=result_txt_path,
+        # )
+        out = self.niche_query_with_benchmark_metrics_report(
+            search_samples,
             ncjs_k_spatial=ncjs_k_spatial,
             ncjs_k_embedding=ncjs_k_embedding,
             batch_k_neighbors=batch_k_neighbors,
             result_txt_path=result_txt_path,
         )
+        return list(out["per_sample"])
 
     """
     Perform a niche query task and visualize results using cosine similarity on given samples.

@@ -1,7 +1,12 @@
 import logging
+import os
+from collections import Counter
 from typing import List, Optional
 
+import matplotlib
 import numpy as np
+import pandas as pd
+from matplotlib.colors import to_hex
 import torch
 from torch_geometric.nn import knn_graph
 from torch_geometric.utils import k_hop_subgraph
@@ -10,6 +15,14 @@ from src.NicheQueryPrototype.database import Cell, Database
 import scanpy as sc
 
 logger = logging.getLogger(__name__)
+
+
+def _parcellation_display_label(c: Cell) -> str:
+    pinfo = c.parcellation_info or {}
+    name = (pinfo.get("name") or "").strip()
+    if name:
+        return f"{c.parcellation_index}: {name}"
+    return str(c.parcellation_index)
 
 
 class Niche:
@@ -97,6 +110,7 @@ class Niche:
         k: int,
         cell_limit: Optional[int] = None,
         parcellation_index: Optional[int] = None,
+        niche_cells_export_path: Optional[str] = None,
     ):
         assert (
             center_cell_id is not None and db.get_cell(center_cell_id) is not None
@@ -160,18 +174,82 @@ class Niche:
         logger.info(
             f"Finished computing niche feature with {len(self.cells)} cells on {self.sample_id} slice."
         )
+        if niche_cells_export_path:
+            lines = [
+                "cell_id\tx\ty\tz\tparcellation_index\tparcellation_name",
+            ]
+            for c in self.cells:
+                pinfo = c.parcellation_info or {}
+                pname = pinfo.get("name")
+                if pname is None:
+                    pname = ""
+                lines.append(
+                    f"{c.id}\t{c.x}\t{c.y}\t{c.z}\t{c.parcellation_index}\t{pname}"
+                )
+            text = "\n".join(lines) + "\n"
+            print(text, end="")
+            out_abs = os.path.abspath(niche_cells_export_path)
+            parent = os.path.dirname(out_abs)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(niche_cells_export_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            logger.info(
+                "Wrote niche cells (n=%d) to %r.",
+                len(self.cells),
+                niche_cells_export_path,
+            )
 
     def visualize(self, db: Database, spot_size: float = 0.02):
         n_cells = len(self.cells)
         logger.info(f"Niche contains {n_cells} cell(s) (sample_id={self.sample_id!r})")
         sample = db.get_sample(self.sample_id)
-        sample.adata.obs["niche_to_query"] = sample.adata.obs_names.isin(
-            [c.id for c in self.cells]
+
+        cnt = Counter(c.parcellation_index for c in self.cells)
+        print(f"Niche cells by parcellation (n_total={n_cells}):")
+        for pidx in sorted(cnt):
+            name = ""
+            for c in self.cells:
+                if c.parcellation_index == pidx:
+                    name = (c.parcellation_info or {}).get("name") or ""
+                    break
+            print(
+                f"  parcellation_index={pidx}  parcellation_name={name!r}  n_cells={cnt[pidx]}"
+            )
+
+        index_to_label: dict[int, str] = {}
+        for c in sorted(self.cells, key=lambda x: x.parcellation_index):
+            if c.parcellation_index not in index_to_label:
+                index_to_label[c.parcellation_index] = _parcellation_display_label(c)
+
+        id_to_cell = {str(c.id): c for c in self.cells}
+        labels: List[str] = []
+        for oid in sample.adata.obs_names:
+            c = id_to_cell.get(str(oid))
+            if c is None:
+                labels.append("—")
+            else:
+                labels.append(index_to_label[c.parcellation_index])
+
+        categories = ["—"] + [index_to_label[i] for i in sorted(index_to_label)]
+        sample.adata.obs["niche_parcellation"] = pd.Categorical(
+            labels, categories=categories
         )
+
+        try:
+            tab20 = matplotlib.colormaps["tab20"]
+        except AttributeError:
+            from matplotlib import cm
+
+            tab20 = cm.get_cmap("tab20")
+        n_parcel = len(index_to_label)
+        niche_colors = [to_hex(tab20((i % 20) / 19.0)) for i in range(n_parcel)]
+        palette = ["#d9d9d9"] + niche_colors
+
         sc.pl.spatial(
             sample.adata,
-            color="niche_to_query",
-            palette=["lightgrey", "red"],  # False, True
+            color="niche_parcellation",
+            palette=palette,
             spot_size=spot_size,
-            title=f"Niche to Query ({sample.id})",
+            title=f"Niche by parcellation ({sample.id})",
         )
