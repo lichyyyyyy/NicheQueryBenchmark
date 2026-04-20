@@ -564,7 +564,14 @@ class NicheQuery:
             rmse = float("nan")
         else:
             auprc = float("nan")
-            pcc = float("nan")
+            if (
+                y_true.size >= 2
+                and np.std(y_true.astype(np.float64)) > 0.0
+                and np.std(y_score.astype(np.float64)) > 0.0
+            ):
+                pcc = float(np.corrcoef(y_true.astype(np.float64), y_score)[0, 1])
+            else:
+                pcc = float("nan")
             if (
                 y_true.size >= 2
                 and np.std(y_true.astype(np.float64)) > 0.0
@@ -632,7 +639,14 @@ class NicheQuery:
                 rmse_s = float("nan")
             else:
                 auprc_s = float("nan")
-                pcc_s = float("nan")
+                if (
+                    yt.size >= 2
+                    and np.std(yt.astype(np.float64)) > 0.0
+                    and np.std(y_score_s.astype(np.float64)) > 0.0
+                ):
+                    pcc_s = float(np.corrcoef(yt.astype(np.float64), y_score_s)[0, 1])
+                else:
+                    pcc_s = float("nan")
                 if (
                     yt.size >= 2
                     and np.std(yt.astype(np.float64)) > 0.0
