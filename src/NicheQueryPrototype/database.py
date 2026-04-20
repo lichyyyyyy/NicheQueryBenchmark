@@ -100,6 +100,9 @@ class Sample:
         # If ture, the cell i belongs to the target parcellation section.
         self.target_parcellation_mask: Optional[np.ndarray] = None
 
+        # RM-Ideal score for each cell in this sample (aligned with ``self.cells`` order).
+        self.rm_ideal_score: Optional[np.ndarray] = None
+
         self.adata: Optional[AnnData] = None
 
     """

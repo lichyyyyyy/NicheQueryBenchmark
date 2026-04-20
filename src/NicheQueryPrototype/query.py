@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.spatial.distance import jensenshannon
+from scipy.stats import spearmanr
 from sklearn.cluster import KMeans
 from sklearn.metrics import (
     adjusted_rand_score,
@@ -27,6 +28,7 @@ from src.NicheQueryPrototype.database import (
 )
 import scanpy as sc
 from src.NicheQueryPrototype.niche import Niche, logger
+from src.NicheQueryPrototype.rm_ideal import RmIdeal
 
 
 def _spatial_viz_figure(
@@ -280,6 +282,50 @@ class NicheQuery:
 
             logger.info(f"[DONE] finish sample: {sample.id}")
 
+    def compute_rm_ideal_score(
+        self,
+        samples: List[Sample],
+        rm_ideal_output_key: Optional[str] = None,
+    ) -> None:
+        """
+        Compute RM-Ideal score for each input sample.
+
+        By default, scores are saved to ``sample.rm_ideal_score``.
+        If ``rm_ideal_output_key`` is provided, scores are also written to
+        ``sample.adata.obs[rm_ideal_output_key]``.
+        """
+        if len(self.niche.cells) == 0:
+            raise ValueError(
+                "self.niche.cells is empty; cannot compute RM-Ideal score."
+            )
+
+        rm_ideal = RmIdeal(wl_iters=self.k)
+        query_niche_cells = self.niche.cells
+
+        for sample in samples:
+            scores = rm_ideal.score_slice(
+                query_niche_cells=query_niche_cells,
+                samples=sample,
+            )
+            if len(scores) != len(sample.cells):
+                raise ValueError(
+                    f"Sample {sample.id!r}: RM-Ideal scores length ({len(scores)}) "
+                    f"does not match number of cells ({len(sample.cells)})."
+                )
+
+            sample.rm_ideal_score = scores
+
+            if rm_ideal_output_key is not None:
+                if sample.adata is None:
+                    raise ValueError(
+                        f"Sample {sample.id!r} has no AnnData; run sample.construct_adata(...) first."
+                    )
+                sample.adata.obs[rm_ideal_output_key] = np.nan
+                for i, cell in enumerate(sample.cells):
+                    sample.adata.obs.loc[cell.id, rm_ideal_output_key] = float(
+                        scores[i]
+                    )
+
     """
     Perform niche query task on a sample and return cosine similarity between query niche and each niches.
     """
@@ -378,7 +424,7 @@ class NicheQuery:
         """
         Like ``niche_query_with_classification_report``, but log and return retrieval /
         embedding benchmark metrics: AUPRC, PCC (Pearson r between cosine score and
-        target mask), average NCJS (QueST-style composition JS on spatial niches vs
+        y_true label), average NCJS (QueST-style composition JS on spatial niches vs
         embedding kNN), AvgBIO (mean of ARI, NMI, ASW w.r.t. parcellation), and
         AvgBATCH (mean of ``(1 - ASW_batch)/2`` and kNN batch-mixing; needs >=2 batches).
 
@@ -388,24 +434,69 @@ class NicheQuery:
         NCJS uses the same global ``n_bins`` as the pooled composition matrix.
 
         Requires ``generate_niche_features_and_parcellation_mask`` to have been run
-        so each sample has ``niche_features`` and ``target_parcellation_mask``.
+        so each sample has ``niche_features``. For each sample, ``y_true`` uses
+        ``sample.rm_ideal_score`` when available; otherwise falls back to
+        ``sample.target_parcellation_mask``.
         """
-        cos_sim_list: List[np.ndarray] = []
-        parcellation_mask_list: List[np.ndarray] = []
+        score_list: List[np.ndarray] = []
+        y_true_list: List[np.ndarray] = []
         for sample in samples:
-            cos_sim_list.append(self.niche_query_within_a_sample(sample))
-            if sample.target_parcellation_mask is not None:
-                parcellation_mask_list.append(sample.target_parcellation_mask)
+            # Niche-query score logic remains unchanged (cosine similarity).
+            score_list.append(self.niche_query_within_a_sample(sample))
 
-        y_score = np.concatenate(cos_sim_list, axis=0)
-        y_true = np.concatenate(parcellation_mask_list, axis=0).astype(int)
+            if sample.rm_ideal_score is not None:
+                yt = np.asarray(sample.rm_ideal_score, dtype=float).reshape(-1)
+            elif sample.target_parcellation_mask is not None:
+                yt = np.asarray(sample.target_parcellation_mask, dtype=float).reshape(
+                    -1
+                )
+            else:
+                raise ValueError(
+                    f"Sample {sample.id!r} has neither rm_ideal_score nor "
+                    "target_parcellation_mask; cannot build y_true."
+                )
+            if len(yt) != len(sample.cells):
+                raise ValueError(
+                    f"Sample {sample.id!r}: y_true length ({len(yt)}) "
+                    f"does not match number of cells ({len(sample.cells)})."
+                )
+            y_true_list.append(yt)
 
-        if len(np.unique(y_true)) >= 2:
-            auprc = float(average_precision_score(y_true, y_score))
-            pcc = float(np.corrcoef(y_true.astype(np.float64), y_score)[0, 1])
+        y_score = np.concatenate(score_list, axis=0)
+        y_true = np.concatenate(y_true_list, axis=0)
+
+        uniq_y = np.unique(y_true)
+        is_binary = len(uniq_y) <= 2 and np.all(np.isin(uniq_y, [0.0, 1.0]))
+        if is_binary and len(uniq_y) >= 2:
+            auprc = float(average_precision_score(y_true.astype(int), y_score))
+            if (
+                y_true.size >= 2
+                and np.std(y_true.astype(np.float64)) > 0.0
+                and np.std(y_score.astype(np.float64)) > 0.0
+            ):
+                pcc = float(np.corrcoef(y_true.astype(np.float64), y_score)[0, 1])
+            else:
+                pcc = float("nan")
+            spearman = float("nan")
+            mae = float("nan")
+            rmse = float("nan")
         else:
             auprc = float("nan")
             pcc = float("nan")
+            if (
+                y_true.size >= 2
+                and np.std(y_true.astype(np.float64)) > 0.0
+                and np.std(y_score.astype(np.float64)) > 0.0
+            ):
+                spearman = float(spearmanr(y_true, y_score).statistic)
+            else:
+                spearman = float("nan")
+            mae = float(np.mean(np.abs(y_true.astype(np.float64) - y_score)))
+            rmse = float(
+                np.sqrt(
+                    np.mean(np.square(y_true.astype(np.float64) - y_score))
+                )
+            )
 
         for s in samples:
             if s.niche_features is None:
@@ -432,6 +523,9 @@ class NicheQuery:
         total: Dict[str, float] = {
             "auprc": auprc,
             "pcc": pcc,
+            "spearman": spearman,
+            "mae": mae,
+            "rmse": rmse,
             "avg_ncjs": avg_ncjs,
             "avg_bio": avg_bio,
             "avg_batch": avg_batch,
@@ -439,19 +533,40 @@ class NicheQuery:
 
         per_sample: List[Dict[str, Any]] = []
         for i, s in enumerate(samples):
-            tpm = s.target_parcellation_mask
-            y_score_s = cos_sim_list[i]
-            if tpm is not None:
-                yt = tpm.astype(int)
-                if len(np.unique(yt)) >= 2:
-                    auprc_s = float(average_precision_score(yt, y_score_s))
+            y_score_s = score_list[i]
+            yt = y_true_list[i]
+            uniq_yt = np.unique(yt)
+            is_binary_s = len(uniq_yt) <= 2 and np.all(np.isin(uniq_yt, [0.0, 1.0]))
+            if is_binary_s and len(uniq_yt) >= 2:
+                auprc_s = float(average_precision_score(yt.astype(int), y_score_s))
+                if (
+                    yt.size >= 2
+                    and np.std(yt.astype(np.float64)) > 0.0
+                    and np.std(y_score_s.astype(np.float64)) > 0.0
+                ):
                     pcc_s = float(np.corrcoef(yt.astype(np.float64), y_score_s)[0, 1])
                 else:
-                    auprc_s = float("nan")
                     pcc_s = float("nan")
+                spearman_s = float("nan")
+                mae_s = float("nan")
+                rmse_s = float("nan")
             else:
                 auprc_s = float("nan")
                 pcc_s = float("nan")
+                if (
+                    yt.size >= 2
+                    and np.std(yt.astype(np.float64)) > 0.0
+                    and np.std(y_score_s.astype(np.float64)) > 0.0
+                ):
+                    spearman_s = float(spearmanr(yt, y_score_s).statistic)
+                else:
+                    spearman_s = float("nan")
+                mae_s = float(np.mean(np.abs(yt.astype(np.float64) - y_score_s)))
+                rmse_s = float(
+                    np.sqrt(
+                        np.mean(np.square(yt.astype(np.float64) - y_score_s))
+                    )
+                )
 
             emb_s = s.niche_features
             assert emb_s is not None
@@ -469,6 +584,9 @@ class NicheQuery:
                     "sample_id": s.id,
                     "auprc": auprc_s,
                     "pcc": pcc_s,
+                    "spearman": spearman_s,
+                    "mae": mae_s,
+                    "rmse": rmse_s,
                     "avg_ncjs": avg_ncjs_s,
                     "avg_bio": avg_bio_s,
                     "avg_batch": avg_batch_s,
@@ -479,7 +597,8 @@ class NicheQuery:
 
         bench_msg = (
             f"Benchmark metrics ({len(samples)} samples) [total]: "
-            f"AUPRC={auprc:.4f}, PCC={pcc:.4f}, avg_NCJS={avg_ncjs:.4f}, "
+            f"AUPRC={auprc:.4f}, PCC={pcc:.4f}, Spearman={spearman:.4f}, "
+            f"MAE={mae:.4f}, RMSE={rmse:.4f}, avg_NCJS={avg_ncjs:.4f}, "
             f"AvgBIO={avg_bio:.4f}, AvgBATCH={avg_batch:.4f}"
         )
         logger.info(bench_msg)
@@ -487,6 +606,7 @@ class NicheQuery:
         for row in per_sample:
             line = (
                 f"  [{row['sample_id']}] AUPRC={row['auprc']:.4f}, PCC={row['pcc']:.4f}, "
+                f"Spearman={row['spearman']:.4f}, MAE={row['mae']:.4f}, RMSE={row['rmse']:.4f}, "
                 f"avg_NCJS={row['avg_ncjs']:.4f}, AvgBIO={row['avg_bio']:.4f}, "
                 f"AvgBATCH={row['avg_batch']:.4f}"
             )
@@ -542,7 +662,7 @@ class NicheQuery:
         return list(out["per_sample"])
 
     """
-    Perform a niche query task and visualize results using cosine similarity on given samples.
+    Perform a niche query task and visualize results.
     """
 
     def niche_query_visualization(
@@ -555,15 +675,31 @@ class NicheQuery:
         viz_panel_size_in: Tuple[float, float] = (2.75, 2.75),
     ) -> None:
         self.generate_niche_features_and_parcellation_mask(search_samples)
+
         for sample in search_samples:
             self.niche_query_within_a_sample(sample)
             if "niche_query_result" not in sample.adata.obs:
                 sample.adata.obs["niche_query_result"] = np.nan
-            target_cells = []
             for cell in sample.cells:
                 sample.adata.obs.loc[cell.id, "niche_query_result"] = float(
                     cell.similarity
                 )
+
+            # Keep niche_query_result unchanged; only switch target_niches source when requested.
+            if show_target_niches and sample.rm_ideal_score is not None:
+                rm_score = np.asarray(sample.rm_ideal_score, dtype=float).reshape(-1)
+                if len(rm_score) != len(sample.cells):
+                    raise ValueError(
+                        f"Sample {sample.id!r}: rm_ideal_score length ({len(rm_score)}) "
+                        f"does not match number of cells ({len(sample.cells)})."
+                    )
+                sample.adata.obs["target_niches"] = np.nan
+                for i, cell in enumerate(sample.cells):
+                    sample.adata.obs.loc[cell.id, "target_niches"] = float(rm_score[i])
+                continue
+
+            target_cells = []
+            for cell in sample.cells:
                 if self.db.cell_matches_parcellation_or_ancestor(
                     cell, self.niche.parcellation_index
                 ):

@@ -109,9 +109,14 @@ class Niche:
         sample_id: Optional[str],
         k: int,
         cell_limit: Optional[int] = None,
-        parcellation_index: Optional[int] = None,
+        parcellation_index: Optional[List[int]] = None,
         niche_cells_export_path: Optional[str] = None,
     ):
+        if isinstance(parcellation_index, int):
+            parcellation_index = [parcellation_index]
+        allowed_parcellations = (
+            set(parcellation_index) if parcellation_index is not None else None
+        )
         assert (
             center_cell_id is not None and db.get_cell(center_cell_id) is not None
         ) or (
@@ -119,12 +124,14 @@ class Niche:
         ), "Center cell or parcellation_index should be not null"
         if center_cell_id is not None and db.get_cell(center_cell_id) is not None:
             self.center_cell = db.get_cell(center_cell_id)
-            self.cells.append(self.center_cell)
             self.sample_id = self.center_cell.sample_id
             self.parcellation_index = self.center_cell.parcellation_index
         elif sample_id is not None and parcellation_index is not None:
             self.sample_id = sample_id
-            self.parcellation_index = parcellation_index
+            # Keep a representative value for display/logging when constructed from a list.
+            self.parcellation_index = (
+                parcellation_index[0] if len(parcellation_index) > 0 else -1
+            )
 
         self.k = k
         self.parcellation_index = parcellation_index
@@ -136,13 +143,16 @@ class Niche:
         coordinates_list = []
         for idx, c in enumerate(sample.cells):
             if self.center_cell is None:
-                if c.parcellation_index == self.parcellation_index:
+                if (
+                    allowed_parcellations is not None
+                    and c.parcellation_index in allowed_parcellations
+                ):
                     center_cell_idx = idx
                     self.center_cell = c
             elif c.id == self.center_cell.id:
                 center_cell_idx = idx
             coordinates_list.append([c.x, c.y])
-        assert center_cell_idx != -1, f"Center cell {self.center_cell.id} not found."
+        assert center_cell_idx != -1, "Center cell not found."
 
         logger.info("Constructing k-hop graph..")
         coordinates = torch.tensor(coordinates_list, dtype=torch.float)
@@ -153,19 +163,17 @@ class Niche:
             edge_index=edge_index,
             relabel_nodes=False,
         )
-        if parcellation_index is None:
+        if allowed_parcellations is None:
             neighbour_cells = [sample.cells[i] for i in subset.cpu().tolist()]
         else:
             neighbour_cells = [
                 sample.cells[i]
                 for i in subset.cpu().tolist()
-                if db.cell_matches_parcellation_or_ancestor(
-                    sample.cells[i], self.parcellation_index
-                )
+                if sample.cells[i].parcellation_index in allowed_parcellations
             ]
 
         if cell_limit is not None and len(neighbour_cells) >= cell_limit:
-            self.cells.extend(neighbour_cells[: (cell_limit - 1)])
+            self.cells.extend(neighbour_cells[:cell_limit])
         else:
             self.cells.extend(neighbour_cells)
 
