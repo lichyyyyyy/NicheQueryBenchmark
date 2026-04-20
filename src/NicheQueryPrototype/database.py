@@ -109,7 +109,9 @@ class Sample:
     Construct an adata from the source adata list.
     """
 
-    def construct_adata(self, var, require_features=False):
+    def construct_adata(
+        self, var, require_features=False, rm_ideal_output_key="rm_ideal_score"
+    ):
         cell_ids = [c.id for c in self.cells]
         if len(cell_ids) == 0:
             self.adata = None
@@ -154,6 +156,14 @@ class Sample:
             self.adata.obsm["X_feature"] = F
         self.adata.obsm["spatial"] = coords
         self.adata.obs["sample_id"] = self.id
+        if self.rm_ideal_score is not None:
+            rm_scores = np.asarray(self.rm_ideal_score, dtype=float).reshape(-1)
+            if rm_scores.shape[0] != len(self.cells):
+                raise ValueError(
+                    f"Sample {self.id!r}: rm_ideal_score length ({rm_scores.shape[0]}) "
+                    f"does not match number of cells ({len(self.cells)})."
+                )
+            self.adata.obs[rm_ideal_output_key] = rm_scores
         self.adata.uns["library_id"] = self.id
 
     def visualize_parcellation_cells(
@@ -317,9 +327,7 @@ class Database:
     ) -> Optional[np.ndarray]:
         for adata in adata_list:
             if embedding_key in adata.obsm.keys() and cell_id in adata.obs.index:
-                return self._row_to_1d_numpy(
-                    adata[cell_id, :].obsm[embedding_key]
-                )
+                return self._row_to_1d_numpy(adata[cell_id, :].obsm[embedding_key])
         return None
 
     """
@@ -334,7 +342,8 @@ class Database:
         cell_metadata_path: List[str],
         ccf_coordinates_path: List[str],
         feature_name: str,
-        parcellation_path: Optional[str],
+        rm_ideal_output_key: str = "rm_ideal_score",
+        parcellation_path: Optional[str] = None,
     ):
         target_set = (
             set(self.target_sample_ids) if self.target_sample_ids is not None else None
@@ -425,6 +434,25 @@ class Database:
                 )
             adata_list.append(ad)
 
+        # Optional: recover precomputed RM-Ideal scores from raw AnnData obs.
+        rm_ideal_score_by_cell: Dict[str, float] = {}
+        n_adatas_with_rm = 0
+        for ad in adata_list:
+            if "rm_ideal_score" not in ad.obs.columns:
+                continue
+            n_adatas_with_rm += 1
+            rm_col = pd.to_numeric(ad.obs["rm_ideal_score"], errors="coerce")
+            for cid, score in zip(ad.obs_names.astype(str), rm_col.to_numpy()):
+                if pd.isna(score):
+                    continue
+                rm_ideal_score_by_cell[cid] = float(score)
+        if n_adatas_with_rm > 0:
+            logger.info(
+                "Detected rm_ideal_score in %d AnnData file(s); loaded %d cell-level scores.",
+                n_adatas_with_rm,
+                len(rm_ideal_score_by_cell),
+            )
+
         if feature_name == "gene_expression" and adata_list:
             name_sets = [set(ad.var_names.astype(str)) for ad in adata_list]
             common_genes = sorted(set.intersection(*name_sets))
@@ -472,6 +500,26 @@ class Database:
             f"Processed {len(self.cells)} cells and {len(self.samples.keys())} samples."
         )
 
+        if rm_ideal_score_by_cell:
+            n_samples_with_rm = 0
+            for sample in self.samples.values():
+                rm_scores = np.array(
+                    [
+                        rm_ideal_score_by_cell.get(str(c.id), np.nan)
+                        for c in sample.cells
+                    ],
+                    dtype=float,
+                )
+                if np.isnan(rm_scores).all():
+                    continue
+                sample.rm_ideal_score = rm_scores
+                n_samples_with_rm += 1
+            logger.info(
+                "Loaded rm_ideal_score into %d/%d samples.",
+                n_samples_with_rm,
+                len(self.samples),
+            )
+
         if feature_name != "gene_expression":
             feat_dims: set = set()
             for c in self.cells:
@@ -502,10 +550,7 @@ class Database:
             # Avoid a long silent stretch on the first huge sample(s).
             _stride = 25 if n_samples > 60 else (10 if n_samples > 20 else 1)
             _verbose = (
-                n_samples <= 30
-                or i < 3
-                or i == n_samples - 1
-                or (i + 1) % _stride == 0
+                n_samples <= 30 or i < 3 or i == n_samples - 1 or (i + 1) % _stride == 0
             )
             if _verbose:
                 logger.info(
@@ -546,6 +591,7 @@ class Database:
             sample.construct_adata(
                 var=sample_var,
                 require_features=(feature_name != "gene_expression"),
+                rm_ideal_output_key="rm_ideal_score",
             )
             if _verbose:
                 logger.info(

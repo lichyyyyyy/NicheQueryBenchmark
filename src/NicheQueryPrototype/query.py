@@ -1,5 +1,6 @@
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+import time
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from scipy.spatial.distance import jensenshannon
@@ -190,15 +191,31 @@ class NicheQuery:
         self.k = k
 
     @staticmethod
-    def get_parcellation_mask(sample: Sample, parcellation_index: int) -> np.ndarray:
+    def get_parcellation_mask(
+        sample: Sample, parcellation_index: Union[int, List[int]]
+    ) -> np.ndarray:
         """
         1 if the cell lies in the target structure or under it in the CCF tree:
-        ``parcellation_index`` equals the cell's index, or appears in
+        ``parcellation_index`` (single int or list of ints) equals the cell's index, or appears in
         ``cell.parcellation_info['parent_ids']`` (ancestor path, includes self when present).
         """
+        if isinstance(parcellation_index, int):
+            targets = [parcellation_index]
+        else:
+            targets = list(parcellation_index)
+        if len(targets) == 0:
+            raise ValueError("parcellation_index cannot be an empty list")
+
         return np.array(
             [
-                1 if cell_matches_parcellation_or_ancestor(c, parcellation_index) else 0
+                (
+                    1
+                    if any(
+                        cell_matches_parcellation_or_ancestor(c, pidx)
+                        for pidx in targets
+                    )
+                    else 0
+                )
                 for c in sample.cells
             ],
             dtype=int,
@@ -285,7 +302,10 @@ class NicheQuery:
     def compute_rm_ideal_score(
         self,
         samples: List[Sample],
-        rm_ideal_output_key: Optional[str] = None,
+        rm_ideal_output_key: Optional[str] = "rm_ideal_score",
+        rm_ideal_post_transform: str = "linear",
+        rm_ideal_temperature: float = 0.1,
+        overwrite: bool = False,
     ) -> None:
         """
         Compute RM-Ideal score for each input sample.
@@ -293,27 +313,74 @@ class NicheQuery:
         By default, scores are saved to ``sample.rm_ideal_score``.
         If ``rm_ideal_output_key`` is provided, scores are also written to
         ``sample.adata.obs[rm_ideal_output_key]``.
+        If ``overwrite`` is False, existing ``sample.rm_ideal_score`` is reused
+        when present and shape-aligned.
         """
         if len(self.niche.cells) == 0:
             raise ValueError(
                 "self.niche.cells is empty; cannot compute RM-Ideal score."
             )
 
-        rm_ideal = RmIdeal(wl_iters=self.k)
+        rm_ideal = RmIdeal(
+            wl_iters=self.k,
+            post_transform=rm_ideal_post_transform,
+            temperature=rm_ideal_temperature,
+        )
         query_niche_cells = self.niche.cells
+        n_samples = len(samples)
+        t0_all = time.perf_counter()
+        logger.info(
+            "[START] RM-Ideal scoring for %d sample(s); wl_iters=%d; output_key=%r; transform=%s; temperature=%.3f; overwrite=%s",
+            n_samples,
+            self.k,
+            rm_ideal_output_key,
+            rm_ideal_post_transform,
+            rm_ideal_temperature,
+            overwrite,
+        )
 
-        for sample in samples:
-            scores = rm_ideal.score_slice(
-                query_niche_cells=query_niche_cells,
-                samples=sample,
+        for i, sample in enumerate(samples, start=1):
+            t0_sample = time.perf_counter()
+            logger.info(
+                "[PROGRESS] RM-Ideal sample %d/%d: %s (n_cells=%d)",
+                i,
+                n_samples,
+                sample.id,
+                len(sample.cells),
             )
+            used_cached = False
+            if not overwrite and sample.rm_ideal_score is not None:
+                cached_scores = np.asarray(sample.rm_ideal_score, dtype=float).reshape(
+                    -1
+                )
+                if len(cached_scores) == len(sample.cells):
+                    scores = cached_scores
+                    used_cached = True
+                else:
+                    logger.warning(
+                        "Sample %r has cached rm_ideal_score with mismatched length (%d vs %d); recomputing.",
+                        sample.id,
+                        len(cached_scores),
+                        len(sample.cells),
+                    )
+                    scores = rm_ideal.score_slice(
+                        query_niche_cells=query_niche_cells,
+                        samples=sample,
+                    )
+            else:
+                scores = rm_ideal.score_slice(
+                    query_niche_cells=query_niche_cells,
+                    samples=sample,
+                )
+
             if len(scores) != len(sample.cells):
                 raise ValueError(
                     f"Sample {sample.id!r}: RM-Ideal scores length ({len(scores)}) "
                     f"does not match number of cells ({len(sample.cells)})."
                 )
 
-            sample.rm_ideal_score = scores
+            if overwrite or sample.rm_ideal_score is None or not used_cached:
+                sample.rm_ideal_score = scores
 
             if rm_ideal_output_key is not None:
                 if sample.adata is None:
@@ -321,10 +388,25 @@ class NicheQuery:
                         f"Sample {sample.id!r} has no AnnData; run sample.construct_adata(...) first."
                     )
                 sample.adata.obs[rm_ideal_output_key] = np.nan
-                for i, cell in enumerate(sample.cells):
+                for cell_idx, cell in enumerate(sample.cells):
                     sample.adata.obs.loc[cell.id, rm_ideal_output_key] = float(
-                        scores[i]
+                        scores[cell_idx]
                     )
+            elapsed_sample = time.perf_counter() - t0_sample
+            logger.info(
+                "[DONE] RM-Ideal sample %d/%d: %s finished in %.2fs (%s)",
+                i,
+                n_samples,
+                sample.id,
+                elapsed_sample,
+                "cached" if used_cached else "computed",
+            )
+        elapsed_all = time.perf_counter() - t0_all
+        logger.info(
+            "[DONE] RM-Ideal scoring finished: %d sample(s) in %.2fs",
+            n_samples,
+            elapsed_all,
+        )
 
     """
     Perform niche query task on a sample and return cosine similarity between query niche and each niches.
@@ -493,9 +575,7 @@ class NicheQuery:
                 spearman = float("nan")
             mae = float(np.mean(np.abs(y_true.astype(np.float64) - y_score)))
             rmse = float(
-                np.sqrt(
-                    np.mean(np.square(y_true.astype(np.float64) - y_score))
-                )
+                np.sqrt(np.mean(np.square(y_true.astype(np.float64) - y_score)))
             )
 
         for s in samples:
@@ -563,9 +643,7 @@ class NicheQuery:
                     spearman_s = float("nan")
                 mae_s = float(np.mean(np.abs(yt.astype(np.float64) - y_score_s)))
                 rmse_s = float(
-                    np.sqrt(
-                        np.mean(np.square(yt.astype(np.float64) - y_score_s))
-                    )
+                    np.sqrt(np.mean(np.square(yt.astype(np.float64) - y_score_s)))
                 )
 
             emb_s = s.niche_features
@@ -698,12 +776,12 @@ class NicheQuery:
                     sample.adata.obs.loc[cell.id, "target_niches"] = float(rm_score[i])
                 continue
 
-            target_cells = []
-            for cell in sample.cells:
-                if self.db.cell_matches_parcellation_or_ancestor(
-                    cell, self.niche.parcellation_index
-                ):
-                    target_cells.append(cell)
+            target_mask = self.get_parcellation_mask(
+                sample, self.niche.parcellation_index
+            )
+            target_cells = [
+                cell for idx, cell in enumerate(sample.cells) if target_mask[idx] == 1
+            ]
             sample.adata.obs["target_niches"] = sample.adata.obs_names.isin(
                 [c.id for c in target_cells]
             )

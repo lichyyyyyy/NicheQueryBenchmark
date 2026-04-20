@@ -34,6 +34,8 @@ class RmIdeal:
         graph_mode: str = "delaunay",
         knn_k: int = 6,
         radius: Optional[float] = None,
+        post_transform: str = "linear",
+        temperature: float = 0.1,
     ) -> None:
         """
         Parameters
@@ -46,11 +48,17 @@ class RmIdeal:
             Number of neighbors if graph_mode == "knn".
         radius
             Radius threshold if graph_mode == "radius".
+        post_transform
+            Score post-processing mode. One of {"linear", "sigmoid", "rank"}.
+        temperature
+            Temperature for sigmoid post-processing (smaller -> stronger contrast).
         """
         self.wl_iters = wl_iters
         self.graph_mode = graph_mode
         self.knn_k = knn_k
         self.radius = radius
+        self.post_transform = post_transform
+        self.temperature = temperature
 
     # =========================
     # Public API
@@ -121,7 +129,7 @@ class RmIdeal:
             )
             scores[center] = self._rm_score_from_features(query_feats, cand_feats)
 
-        return scores
+        return self._post_transform_scores(scores)
 
     def best_match(
         self,
@@ -372,3 +380,28 @@ class RmIdeal:
         cost = self._hamming_cost_matrix(query_feats, cand_feats)
         w = self._emd_uniform_exact(cost)
         return float(np.clip(1.0 - w, 0.0, 1.0))
+
+    def _post_transform_scores(self, raw_scores: np.ndarray) -> np.ndarray:
+        # Base linear normalization to [0, 1].
+        s_min = float(np.min(raw_scores))
+        s_max = float(np.max(raw_scores))
+        if np.isclose(s_max, s_min):
+            linear = np.zeros_like(raw_scores, dtype=float)
+        else:
+            linear = (raw_scores - s_min) / (s_max - s_min)
+
+        if self.post_transform == "linear":
+            return linear
+        if self.post_transform == "sigmoid":
+            if self.temperature <= 0:
+                raise ValueError("temperature must be > 0 when post_transform='sigmoid'")
+            z = (linear - 0.5) / float(self.temperature)
+            return 1.0 / (1.0 + np.exp(-z))
+        if self.post_transform == "rank":
+            if linear.size <= 1:
+                return np.zeros_like(linear, dtype=float)
+            order = np.argsort(linear, kind="mergesort")
+            ranks = np.empty_like(order, dtype=float)
+            ranks[order] = np.arange(order.size, dtype=float)
+            return ranks / float(order.size - 1)
+        raise ValueError("post_transform must be one of {'linear', 'sigmoid', 'rank'}")
