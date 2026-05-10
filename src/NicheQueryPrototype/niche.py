@@ -111,6 +111,7 @@ class Niche:
         cell_limit: Optional[int] = None,
         parcellation_index: Optional[List[int]] = None,
         niche_cells_export_path: Optional[str] = None,
+        niche_name: Optional[str] = None,
     ):
         if isinstance(parcellation_index, int):
             parcellation_index = [parcellation_index]
@@ -182,6 +183,30 @@ class Niche:
         logger.info(
             f"Finished computing niche feature with {len(self.cells)} cells on {self.sample_id} slice."
         )
+        if niche_name is not None and str(niche_name).strip() != "":
+            key = str(niche_name).strip()
+            adata = sample.adata
+            if adata is None:
+                logger.warning(
+                    "niche_name=%r set but sample %r has no adata; skip writing obsm.",
+                    key,
+                    self.sample_id,
+                )
+            else:
+                niche_ids = {str(c.id) for c in self.cells}
+                n_obs = adata.n_obs
+                flags = np.fromiter(
+                    (1.0 if str(oid) in niche_ids else 0.0 for oid in adata.obs_names),
+                    dtype=np.float64,
+                    count=n_obs,
+                )
+                adata.obsm[key] = flags.reshape(n_obs, 1)
+                logger.info(
+                    "Wrote niche membership to adata.obsm[%r] (n_in_niche=%d, n_obs=%d).",
+                    key,
+                    int(flags.sum()),
+                    n_obs,
+                )
         if niche_cells_export_path:
             lines = [
                 "cell_id\tx\ty\tz\tparcellation_index\tparcellation_name",
@@ -260,4 +285,36 @@ class Niche:
             palette=palette,
             spot_size=spot_size,
             title=f"Niche by parcellation ({sample.id})",
+        )
+
+        # Second figure: full sample colored by each spot's parcellation_index; missing cell → gray.
+        id_to_full_cell = {str(c.id): c for c in sample.cells}
+        rep_by_pidx: dict[int, Cell] = {}
+        for c in sample.cells:
+            if c.parcellation_index not in rep_by_pidx:
+                rep_by_pidx[c.parcellation_index] = c
+        all_pidx_sorted = sorted(rep_by_pidx)
+        pidx_to_display = {
+            p: _parcellation_display_label(rep_by_pidx[p]) for p in all_pidx_sorted
+        }
+        sample_pidx_labels: List[str] = []
+        for oid in sample.adata.obs_names:
+            cf = id_to_full_cell.get(str(oid))
+            if cf is None:
+                sample_pidx_labels.append("—")
+            else:
+                sample_pidx_labels.append(pidx_to_display[cf.parcellation_index])
+        categories_all = ["—"] + [pidx_to_display[p] for p in all_pidx_sorted]
+        sample.adata.obs["sample_parcellation_index"] = pd.Categorical(
+            sample_pidx_labels, categories=categories_all
+        )
+        n_all = len(all_pidx_sorted)
+        all_colors = [to_hex(tab20((i % 20) / 19.0)) for i in range(n_all)]
+        palette_all = ["#d9d9d9"] + all_colors
+        sc.pl.spatial(
+            sample.adata,
+            color="sample_parcellation_index",
+            palette=palette_all,
+            spot_size=spot_size,
+            title=f"Full sample by parcellation_index ({sample.id})",
         )
