@@ -3,10 +3,9 @@ import os
 from collections import Counter
 from typing import List, Optional
 
-import matplotlib
 import numpy as np
 import pandas as pd
-from matplotlib.colors import to_hex
+from matplotlib.colors import hsv_to_rgb, to_hex
 import torch
 from torch_geometric.nn import knn_graph
 from torch_geometric.utils import k_hop_subgraph
@@ -23,6 +22,40 @@ def _parcellation_display_label(c: Cell) -> str:
     if name:
         return f"{c.parcellation_index}: {name}"
     return str(c.parcellation_index)
+
+
+def _niche_highlight_parcellation_set(niche: "Niche") -> set[int]:
+    """
+    Parcellation indices to color in ``visualize``; all other spots use gray.
+    ``niche.parcellation_index`` may be int (e.g. center cell) or list (k-hop allowlist).
+    """
+    p = niche.parcellation_index
+    if isinstance(p, (list, tuple, set)):
+        s = {int(x) for x in p}
+        if s:
+            return s
+    elif isinstance(p, int):
+        return {p}
+    return {c.parcellation_index for c in niche.cells}
+
+
+def _distinct_category_hexes(n: int) -> List[str]:
+    """
+    Strongly separated colors for categorical parcellation plots (not including gray).
+    Uses golden-ratio hue steps plus staggered saturation/value so nearby legend
+    entries do not look like tab20 repeats.
+    """
+    if n <= 0:
+        return []
+    phi = (np.sqrt(5.0) - 1.0) / 2.0
+    out: List[str] = []
+    for i in range(n):
+        h = float((0.11 + i * phi) % 1.0)
+        s = 0.68 + 0.30 * ((i * 3) % 2)
+        v = 0.72 + 0.24 * ((i * 5) % 2)
+        rgb = np.asarray(hsv_to_rgb([h, s, v]), dtype=float)
+        out.append(to_hex(np.clip(rgb, 0.0, 1.0)))
+    return out
 
 
 class Niche:
@@ -238,6 +271,8 @@ class Niche:
         logger.info(f"Niche contains {n_cells} cell(s) (sample_id={self.sample_id!r})")
         sample = db.get_sample(self.sample_id)
 
+        highlight_pidx = _niche_highlight_parcellation_set(self)
+
         cnt = Counter(c.parcellation_index for c in self.cells)
         print(f"Niche cells by parcellation (n_total={n_cells}):")
         for pidx in sorted(cnt):
@@ -250,33 +285,30 @@ class Niche:
                 f"  parcellation_index={pidx}  parcellation_name={name!r}  n_cells={cnt[pidx]}"
             )
 
-        index_to_label: dict[int, str] = {}
-        for c in sorted(self.cells, key=lambda x: x.parcellation_index):
-            if c.parcellation_index not in index_to_label:
-                index_to_label[c.parcellation_index] = _parcellation_display_label(c)
+        highlight_sorted = sorted(highlight_pidx)
+        pidx_to_label: dict[int, str] = {}
+        for p in highlight_sorted:
+            rep = next((c for c in self.cells if c.parcellation_index == p), None)
+            if rep is None:
+                rep = next((c for c in sample.cells if c.parcellation_index == p), None)
+            pidx_to_label[p] = _parcellation_display_label(rep) if rep is not None else str(p)
 
         id_to_cell = {str(c.id): c for c in self.cells}
         labels: List[str] = []
         for oid in sample.adata.obs_names:
             c = id_to_cell.get(str(oid))
-            if c is None:
+            if c is None or c.parcellation_index not in highlight_pidx:
                 labels.append("—")
             else:
-                labels.append(index_to_label[c.parcellation_index])
+                labels.append(pidx_to_label[c.parcellation_index])
 
-        categories = ["—"] + [index_to_label[i] for i in sorted(index_to_label)]
+        categories = ["—"] + [pidx_to_label[p] for p in highlight_sorted]
         sample.adata.obs["niche_parcellation"] = pd.Categorical(
             labels, categories=categories
         )
 
-        try:
-            tab20 = matplotlib.colormaps["tab20"]
-        except AttributeError:
-            from matplotlib import cm
-
-            tab20 = cm.get_cmap("tab20")
-        n_parcel = len(index_to_label)
-        niche_colors = [to_hex(tab20((i % 20) / 19.0)) for i in range(n_parcel)]
+        n_parcel = len(highlight_sorted)
+        niche_colors = _distinct_category_hexes(n_parcel)
         palette = ["#d9d9d9"] + niche_colors
 
         sc.pl.spatial(
@@ -287,34 +319,26 @@ class Niche:
             title=f"Niche by parcellation ({sample.id})",
         )
 
-        # Second figure: full sample colored by each spot's parcellation_index; missing cell → gray.
+        # Full sample: only spots whose parcellation_index is in niche.parcellation_index; else gray.
         id_to_full_cell = {str(c.id): c for c in sample.cells}
-        rep_by_pidx: dict[int, Cell] = {}
-        for c in sample.cells:
-            if c.parcellation_index not in rep_by_pidx:
-                rep_by_pidx[c.parcellation_index] = c
-        all_pidx_sorted = sorted(rep_by_pidx)
-        pidx_to_display = {
-            p: _parcellation_display_label(rep_by_pidx[p]) for p in all_pidx_sorted
-        }
         sample_pidx_labels: List[str] = []
         for oid in sample.adata.obs_names:
             cf = id_to_full_cell.get(str(oid))
-            if cf is None:
+            if cf is None or cf.parcellation_index not in highlight_pidx:
                 sample_pidx_labels.append("—")
             else:
-                sample_pidx_labels.append(pidx_to_display[cf.parcellation_index])
-        categories_all = ["—"] + [pidx_to_display[p] for p in all_pidx_sorted]
+                sample_pidx_labels.append(pidx_to_label[cf.parcellation_index])
+        categories_all = ["—"] + [pidx_to_label[p] for p in highlight_sorted]
         sample.adata.obs["sample_parcellation_index"] = pd.Categorical(
             sample_pidx_labels, categories=categories_all
         )
-        n_all = len(all_pidx_sorted)
-        all_colors = [to_hex(tab20((i % 20) / 19.0)) for i in range(n_all)]
-        palette_all = ["#d9d9d9"] + all_colors
+        palette_all = ["#d9d9d9"] + niche_colors
         sc.pl.spatial(
             sample.adata,
             color="sample_parcellation_index",
             palette=palette_all,
             spot_size=spot_size,
-            title=f"Full sample by parcellation_index ({sample.id})",
+            title=(
+                f"Highlighted parcellation(s) on full sample ({sample.id})"
+            ),
         )

@@ -32,6 +32,76 @@ from src.NicheQueryPrototype.niche import Niche, logger
 from src.NicheQueryPrototype.rm_ideal import RmIdeal
 
 
+def _as_1d_float64(a: np.ndarray) -> np.ndarray:
+    """1-D float64 vector for metrics / correlation (avoids (N,1) vs (N,) corrcoef issues)."""
+    return np.asarray(a, dtype=np.float64).reshape(-1)
+
+
+def _k_for_top_fraction(n: int, frac: float) -> int:
+    """Number of top-ranked cells for ``frac`` of corpus size (at least 1, at most ``n``)."""
+    if n <= 0:
+        return 0
+    return max(1, min(n, int(np.ceil(float(frac) * n))))
+
+
+def _graded_relevance_minmax(rel: np.ndarray) -> np.ndarray:
+    """Map relevance to [0, 1] for stable ``2**rel - 1`` gains; constant vector → all zeros."""
+    r = _as_1d_float64(rel)
+    lo, hi = float(np.min(r)), float(np.max(r))
+    span = hi - lo
+    if span < 1e-12:
+        return np.zeros_like(r)
+    return (r - lo) / span
+
+
+def _dcg_from_gains_at_prefix(gains_desc: np.ndarray) -> float:
+    """
+    DCG over the first ``len(gains_desc)`` positions (rank 1 = index 0):
+    sum_i (2^{g_i} - 1) / log2(i + 2).
+    """
+    if gains_desc.size == 0:
+        return 0.0
+    i = np.arange(gains_desc.size, dtype=np.float64)
+    return float(
+        np.sum((np.power(2.0, gains_desc) - 1.0) / np.log2(i + 2.0))
+    )
+
+
+def _ndcg_at_fractions(
+    pred_scores: np.ndarray, true_relevance: np.ndarray
+) -> Dict[str, float]:
+    """
+    NDCG@K for K = ceil(1%·n), ceil(5%·n), ceil(10%·n) cells (niche_query ranking vs RM-Ideal).
+
+    DCG@K uses cells ranked by ``pred_scores`` descending; IDCG@K uses ideal order by
+    graded relevance from ``true_relevance`` (min–max normalized to [0, 1]).
+    """
+    pred = _as_1d_float64(pred_scores)
+    rel = _as_1d_float64(true_relevance)
+    n = pred.size
+    out: Dict[str, float] = {}
+    if n == 0:
+        for key in ("ndcg_at_1pct", "ndcg_at_5pct", "ndcg_at_10pct"):
+            out[key] = float("nan")
+        return out
+
+    rel_n = _graded_relevance_minmax(rel)
+    ideal_desc = np.sort(rel_n)[::-1]
+    order = np.argsort(-pred, kind="mergesort")
+    rel_by_pred = rel_n[order]
+
+    for frac, key in ((0.01, "ndcg_at_1pct"), (0.05, "ndcg_at_5pct"), (0.10, "ndcg_at_10pct")):
+        k = _k_for_top_fraction(n, frac)
+        ideal_gains = ideal_desc[:k]
+        idcg = _dcg_from_gains_at_prefix(ideal_gains)
+        dcg = _dcg_from_gains_at_prefix(rel_by_pred[:k])
+        if idcg <= 1e-12:
+            out[key] = 1.0 if dcg <= 1e-12 else float("nan")
+        else:
+            out[key] = float(dcg / idcg)
+    return out
+
+
 def _spatial_viz_figure(
     n_panels: int,
     *,
@@ -423,9 +493,10 @@ class NicheQuery:
             )
         cos_sim = cosine_similarity(
             self.niche.feature.reshape(1, -1), sample.niche_features
-        ).squeeze()
+        )
+        cos_sim = _as_1d_float64(np.asarray(cos_sim).squeeze())
         for i, cell in enumerate(sample.cells):
-            cell.similarity = cos_sim[i]
+            cell.similarity = float(cos_sim[i])
         return cos_sim
 
     """
@@ -519,19 +590,35 @@ class NicheQuery:
         so each sample has ``niche_features``. For each sample, ``y_true`` uses
         ``sample.rm_ideal_score`` when available; otherwise falls back to
         ``sample.target_parcellation_mask``.
+
+        **AUPRC** is only defined when ``y_true`` is strict binary ``{0, 1}`` with both
+        classes present (retrieval / classification style). Continuous
+        ``rm_ideal_score`` yields ``auprc=nan`` by design; use
+        ``target_parcellation_mask`` as ``y_true``, or binarize RM-Ideal, if you need
+        a finite AUPRC.
+
+        **NDCG@K** (``ndcg_at_1pct``, ``ndcg_at_5pct``, ``ndcg_at_10pct``): for each
+        sample with ``rm_ideal_score``, ranks cells by niche-query cosine score and
+        uses RM-Ideal as graded relevance (min–max normalized). ``K`` is
+        ``max(1, ceil(frac * n_cells))`` for ``frac`` in ``{0.01, 0.05, 0.10}``.
+        Pooled values concatenate all such samples. If ``rm_ideal_score`` is missing,
+        per-sample NDCG is ``nan``.
         """
         score_list: List[np.ndarray] = []
         y_true_list: List[np.ndarray] = []
+        rm_ideal_for_ndcg_list: List[Optional[np.ndarray]] = []
         for sample in samples:
             # Niche-query score logic remains unchanged (cosine similarity).
             score_list.append(self.niche_query_within_a_sample(sample))
 
             if sample.rm_ideal_score is not None:
-                yt = np.asarray(sample.rm_ideal_score, dtype=float).reshape(-1)
+                yt = _as_1d_float64(np.asarray(sample.rm_ideal_score, dtype=float))
+                rm_ideal_for_ndcg_list.append(yt)
             elif sample.target_parcellation_mask is not None:
-                yt = np.asarray(sample.target_parcellation_mask, dtype=float).reshape(
-                    -1
+                yt = _as_1d_float64(
+                    np.asarray(sample.target_parcellation_mask, dtype=float)
                 )
+                rm_ideal_for_ndcg_list.append(None)
             else:
                 raise ValueError(
                     f"Sample {sample.id!r} has neither rm_ideal_score nor "
@@ -544,8 +631,8 @@ class NicheQuery:
                 )
             y_true_list.append(yt)
 
-        y_score = np.concatenate(score_list, axis=0)
-        y_true = np.concatenate(y_true_list, axis=0)
+        y_score = _as_1d_float64(np.concatenate(score_list, axis=0))
+        y_true = _as_1d_float64(np.concatenate(y_true_list, axis=0))
 
         uniq_y = np.unique(y_true)
         is_binary = len(uniq_y) <= 2 and np.all(np.isin(uniq_y, [0.0, 1.0]))
@@ -553,10 +640,10 @@ class NicheQuery:
             auprc = float(average_precision_score(y_true.astype(int), y_score))
             if (
                 y_true.size >= 2
-                and np.std(y_true.astype(np.float64)) > 0.0
-                and np.std(y_score.astype(np.float64)) > 0.0
+                and np.std(y_true) > 0.0
+                and np.std(y_score) > 0.0
             ):
-                pcc = float(np.corrcoef(y_true.astype(np.float64), y_score)[0, 1])
+                pcc = float(np.corrcoef(y_true, y_score)[0, 1])
             else:
                 pcc = float("nan")
             spearman = float("nan")
@@ -564,26 +651,22 @@ class NicheQuery:
             rmse = float("nan")
         else:
             auprc = float("nan")
-            if (
-                y_true.size >= 2
-                and np.std(y_true.astype(np.float64)) > 0.0
-                and np.std(y_score.astype(np.float64)) > 0.0
-            ):
-                pcc = float(np.corrcoef(y_true.astype(np.float64), y_score)[0, 1])
+            logger.info(
+                "AUPRC is nan: y_true is not strict binary {{0, 1}} with both classes "
+                "present (n_unique=%d). AUPRC needs binary labels, e.g. "
+                "target_parcellation_mask; continuous rm_ideal_score will not produce AUPRC.",
+                len(uniq_y),
+            )
+            if y_true.size >= 2 and np.std(y_true) > 0.0 and np.std(y_score) > 0.0:
+                pcc = float(np.corrcoef(y_true, y_score)[0, 1])
             else:
                 pcc = float("nan")
-            if (
-                y_true.size >= 2
-                and np.std(y_true.astype(np.float64)) > 0.0
-                and np.std(y_score.astype(np.float64)) > 0.0
-            ):
+            if y_true.size >= 2 and np.std(y_true) > 0.0 and np.std(y_score) > 0.0:
                 spearman = float(spearmanr(y_true, y_score).statistic)
             else:
                 spearman = float("nan")
-            mae = float(np.mean(np.abs(y_true.astype(np.float64) - y_score)))
-            rmse = float(
-                np.sqrt(np.mean(np.square(y_true.astype(np.float64) - y_score)))
-            )
+            mae = float(np.mean(np.abs(y_true - y_score)))
+            rmse = float(np.sqrt(np.mean(np.square(y_true - y_score))))
 
         for s in samples:
             if s.niche_features is None:
@@ -607,6 +690,25 @@ class NicheQuery:
             emb, bio_labels, batch_enc, batch_k_neighbors
         )
 
+        pred_ndcg_parts: List[np.ndarray] = []
+        rel_ndcg_parts: List[np.ndarray] = []
+        for i, s in enumerate(samples):
+            rv = rm_ideal_for_ndcg_list[i]
+            if rv is not None:
+                pred_ndcg_parts.append(score_list[i])
+                rel_ndcg_parts.append(rv)
+        if pred_ndcg_parts:
+            ndcg_pooled = _ndcg_at_fractions(
+                _as_1d_float64(np.concatenate(pred_ndcg_parts, axis=0)),
+                _as_1d_float64(np.concatenate(rel_ndcg_parts, axis=0)),
+            )
+        else:
+            ndcg_pooled = {
+                "ndcg_at_1pct": float("nan"),
+                "ndcg_at_5pct": float("nan"),
+                "ndcg_at_10pct": float("nan"),
+            }
+
         total: Dict[str, float] = {
             "auprc": auprc,
             "pcc": pcc,
@@ -616,22 +718,21 @@ class NicheQuery:
             "avg_ncjs": avg_ncjs,
             "avg_bio": avg_bio,
             "avg_batch": avg_batch,
+            "ndcg_at_1pct": ndcg_pooled["ndcg_at_1pct"],
+            "ndcg_at_5pct": ndcg_pooled["ndcg_at_5pct"],
+            "ndcg_at_10pct": ndcg_pooled["ndcg_at_10pct"],
         }
 
         per_sample: List[Dict[str, Any]] = []
         for i, s in enumerate(samples):
-            y_score_s = score_list[i]
-            yt = y_true_list[i]
+            y_score_s = _as_1d_float64(score_list[i])
+            yt = _as_1d_float64(y_true_list[i])
             uniq_yt = np.unique(yt)
             is_binary_s = len(uniq_yt) <= 2 and np.all(np.isin(uniq_yt, [0.0, 1.0]))
             if is_binary_s and len(uniq_yt) >= 2:
                 auprc_s = float(average_precision_score(yt.astype(int), y_score_s))
-                if (
-                    yt.size >= 2
-                    and np.std(yt.astype(np.float64)) > 0.0
-                    and np.std(y_score_s.astype(np.float64)) > 0.0
-                ):
-                    pcc_s = float(np.corrcoef(yt.astype(np.float64), y_score_s)[0, 1])
+                if yt.size >= 2 and np.std(yt) > 0.0 and np.std(y_score_s) > 0.0:
+                    pcc_s = float(np.corrcoef(yt, y_score_s)[0, 1])
                 else:
                     pcc_s = float("nan")
                 spearman_s = float("nan")
@@ -639,26 +740,16 @@ class NicheQuery:
                 rmse_s = float("nan")
             else:
                 auprc_s = float("nan")
-                if (
-                    yt.size >= 2
-                    and np.std(yt.astype(np.float64)) > 0.0
-                    and np.std(y_score_s.astype(np.float64)) > 0.0
-                ):
-                    pcc_s = float(np.corrcoef(yt.astype(np.float64), y_score_s)[0, 1])
+                if yt.size >= 2 and np.std(yt) > 0.0 and np.std(y_score_s) > 0.0:
+                    pcc_s = float(np.corrcoef(yt, y_score_s)[0, 1])
                 else:
                     pcc_s = float("nan")
-                if (
-                    yt.size >= 2
-                    and np.std(yt.astype(np.float64)) > 0.0
-                    and np.std(y_score_s.astype(np.float64)) > 0.0
-                ):
+                if yt.size >= 2 and np.std(yt) > 0.0 and np.std(y_score_s) > 0.0:
                     spearman_s = float(spearmanr(yt, y_score_s).statistic)
                 else:
                     spearman_s = float("nan")
-                mae_s = float(np.mean(np.abs(yt.astype(np.float64) - y_score_s)))
-                rmse_s = float(
-                    np.sqrt(np.mean(np.square(yt.astype(np.float64) - y_score_s)))
-                )
+                mae_s = float(np.mean(np.abs(yt - y_score_s)))
+                rmse_s = float(np.sqrt(np.mean(np.square(yt - y_score_s))))
 
             emb_s = s.niche_features
             assert emb_s is not None
@@ -671,6 +762,16 @@ class NicheQuery:
                 emb_s, bio_s, batch_s, batch_k_neighbors
             )
 
+            rmv = rm_ideal_for_ndcg_list[i]
+            if rmv is not None:
+                ndcg_s = _ndcg_at_fractions(y_score_s, rmv)
+            else:
+                ndcg_s = {
+                    "ndcg_at_1pct": float("nan"),
+                    "ndcg_at_5pct": float("nan"),
+                    "ndcg_at_10pct": float("nan"),
+                }
+
             per_sample.append(
                 {
                     "sample_id": s.id,
@@ -682,6 +783,9 @@ class NicheQuery:
                     "avg_ncjs": avg_ncjs_s,
                     "avg_bio": avg_bio_s,
                     "avg_batch": avg_batch_s,
+                    "ndcg_at_1pct": ndcg_s["ndcg_at_1pct"],
+                    "ndcg_at_5pct": ndcg_s["ndcg_at_5pct"],
+                    "ndcg_at_10pct": ndcg_s["ndcg_at_10pct"],
                 }
             )
 
@@ -693,14 +797,25 @@ class NicheQuery:
             f"MAE={mae:.4f}, RMSE={rmse:.4f}, avg_NCJS={avg_ncjs:.4f}, "
             f"AvgBIO={avg_bio:.4f}, AvgBATCH={avg_batch:.4f}"
         )
+        ndcg_msg = (
+            f"NDCG@K (niche_query vs rm_ideal, pooled): "
+            f"@1%={ndcg_pooled['ndcg_at_1pct']:.4f}, "
+            f"@5%={ndcg_pooled['ndcg_at_5pct']:.4f}, "
+            f"@10%={ndcg_pooled['ndcg_at_10pct']:.4f} "
+            f"(K=ceil(frac·n_cells) per slice; nan if no rm_ideal_score)"
+        )
         logger.info(bench_msg)
+        logger.info(ndcg_msg)
         _append_result_txt(result_txt_path, bench_msg + "\n")
+        _append_result_txt(result_txt_path, ndcg_msg + "\n")
         for row in per_sample:
             line = (
                 f"  [{row['sample_id']}] AUPRC={row['auprc']:.4f}, PCC={row['pcc']:.4f}, "
                 f"Spearman={row['spearman']:.4f}, MAE={row['mae']:.4f}, RMSE={row['rmse']:.4f}, "
                 f"avg_NCJS={row['avg_ncjs']:.4f}, AvgBIO={row['avg_bio']:.4f}, "
-                f"AvgBATCH={row['avg_batch']:.4f}"
+                f"AvgBATCH={row['avg_batch']:.4f}, "
+                f"NDCG@1%={row['ndcg_at_1pct']:.4f}, NDCG@5%={row['ndcg_at_5pct']:.4f}, "
+                f"NDCG@10%={row['ndcg_at_10pct']:.4f}"
             )
             logger.info(line)
             _append_result_txt(result_txt_path, line + "\n")
@@ -725,6 +840,13 @@ class NicheQuery:
         batch_k_neighbors: int = 15,
         result_txt_path: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        """
+        Run ``generate_niche_features_and_parcellation_mask`` then benchmark metrics.
+
+        Includes **NDCG@K** (K = top 1%, 5%, 10% of cells by count) comparing
+        niche-query cosine scores to ``rm_ideal_score`` when the latter exists; see
+        :meth:`niche_query_with_benchmark_metrics_report`.
+        """
         self.generate_niche_features_and_parcellation_mask(search_samples)
         # target_samples_ = [
         #     s for s in search_samples if s.target_parcellation_mask.sum() > 0

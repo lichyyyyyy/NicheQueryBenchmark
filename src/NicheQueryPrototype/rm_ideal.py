@@ -394,7 +394,9 @@ class RmIdeal:
             return linear
         if self.post_transform == "sigmoid":
             if self.temperature <= 0:
-                raise ValueError("temperature must be > 0 when post_transform='sigmoid'")
+                raise ValueError(
+                    "temperature must be > 0 when post_transform='sigmoid'"
+                )
             z = (linear - 0.5) / float(self.temperature)
             return 1.0 / (1.0 + np.exp(-z))
         if self.post_transform == "rank":
@@ -404,4 +406,7 @@ class RmIdeal:
             ranks = np.empty_like(order, dtype=float)
             ranks[order] = np.arange(order.size, dtype=float)
             return ranks / float(order.size - 1)
-        raise ValueError("post_transform must be one of {'linear', 'sigmoid', 'rank'}")
+        logger.info(
+            f"No post_transform or unknown post_transform: {self.post_transform}. Returning raw scores."
+        )
+        return raw_scores
