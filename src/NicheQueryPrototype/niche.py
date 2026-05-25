@@ -105,7 +105,7 @@ class Niche:
     def construct_by_parcellation(
         self,
         db: Database,
-        center_cell: Optional[Cell],
+        center_cell: Optional[Cell] = None,
         sample_id: Optional[str],
         parcellation_index: Optional[int],
     ):
@@ -138,12 +138,12 @@ class Niche:
     def construct_by_k_hop(
         self,
         db: Database,
-        center_cell_id: Optional[str],
-        sample_id: Optional[str],
-        k: int,
+        center_cell_id: Optional[str]=None,
+        sample_id: Optional[str]=None,
+        k: int=5,
         cell_limit: Optional[int] = None,
         parcellation_index: Optional[List[int]] = None,
-        niche_cells_export_path: Optional[str] = None,
+        niche_cells_export_path: Optional[str] = None, 
         niche_name: Optional[str] = None,
     ):
         if isinstance(parcellation_index, int):
@@ -291,7 +291,9 @@ class Niche:
             rep = next((c for c in self.cells if c.parcellation_index == p), None)
             if rep is None:
                 rep = next((c for c in sample.cells if c.parcellation_index == p), None)
-            pidx_to_label[p] = _parcellation_display_label(rep) if rep is not None else str(p)
+            pidx_to_label[p] = (
+                _parcellation_display_label(rep) if rep is not None else str(p)
+            )
 
         id_to_cell = {str(c.id): c for c in self.cells}
         labels: List[str] = []
@@ -338,7 +340,5 @@ class Niche:
             color="sample_parcellation_index",
             palette=palette_all,
             spot_size=spot_size,
-            title=(
-                f"Highlighted parcellation(s) on full sample ({sample.id})"
-            ),
+            title=(f"Highlighted parcellation(s) on full sample ({sample.id})"),
         )

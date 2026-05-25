@@ -448,6 +448,21 @@ class NicheQuery:
         ``sample.adata.obs[rm_ideal_output_key]``.
         If ``overwrite`` is False, existing ``sample.rm_ideal_score`` is reused
         when present and shape-aligned.
+
+        Parameters
+        ----------
+        rm_ideal_post_transform
+            Score post-processing passed to :class:`RmIdeal`. One of:
+
+            - ``"linear"`` (default): min-max normalize raw scores to [0, 1].
+            - ``"sigmoid"``: apply a sigmoid on the linear-normalized scores;
+              use ``rm_ideal_temperature`` (must be > 0; smaller values yield
+              stronger contrast).
+            - ``"rank"``: replace scores with rank percentiles in [0, 1].
+
+            Unknown values fall back to raw scores (see ``RmIdeal``).
+        rm_ideal_temperature
+            Temperature for sigmoid post-processing; ignored for other modes.
         """
         if len(self.niche.cells) == 0:
             raise ValueError(
