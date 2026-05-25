@@ -438,17 +438,18 @@ class Database:
         rm_ideal_score_by_cell: Dict[str, float] = {}
         n_adatas_with_rm = 0
         for ad in adata_list:
-            if "rm_ideal_score" not in ad.obs.columns:
+            if rm_ideal_output_key not in ad.obs.columns:
                 continue
             n_adatas_with_rm += 1
-            rm_col = pd.to_numeric(ad.obs["rm_ideal_score"], errors="coerce")
+            rm_col = pd.to_numeric(ad.obs[rm_ideal_output_key], errors="coerce")
             for cid, score in zip(ad.obs_names.astype(str), rm_col.to_numpy()):
                 if pd.isna(score):
                     continue
                 rm_ideal_score_by_cell[cid] = float(score)
         if n_adatas_with_rm > 0:
             logger.info(
-                "Detected rm_ideal_score in %d AnnData file(s); loaded %d cell-level scores.",
+                "Detected %r in %d AnnData file(s); loaded %d cell-level scores.",
+                rm_ideal_output_key,
                 n_adatas_with_rm,
                 len(rm_ideal_score_by_cell),
             )
@@ -591,7 +592,7 @@ class Database:
             sample.construct_adata(
                 var=sample_var,
                 require_features=(feature_name != "gene_expression"),
-                rm_ideal_output_key="rm_ideal_score",
+                rm_ideal_output_key=rm_ideal_output_key,
             )
             if _verbose:
                 logger.info(

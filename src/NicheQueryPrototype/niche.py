@@ -106,8 +106,8 @@ class Niche:
         self,
         db: Database,
         center_cell: Optional[Cell] = None,
-        sample_id: Optional[str],
-        parcellation_index: Optional[int],
+        sample_id: Optional[str] = None,
+        parcellation_index: Optional[int] = None,
     ):
         assert center_cell is not None or (
             sample_id is not None and parcellation_index is not None
@@ -138,12 +138,12 @@ class Niche:
     def construct_by_k_hop(
         self,
         db: Database,
-        center_cell_id: Optional[str]=None,
-        sample_id: Optional[str]=None,
-        k: int=5,
+        center_cell_id: Optional[str] = None,
+        sample_id: Optional[str] = None,
+        k: int = 5,
         cell_limit: Optional[int] = None,
         parcellation_index: Optional[List[int]] = None,
-        niche_cells_export_path: Optional[str] = None, 
+        niche_cells_export_path: Optional[str] = None,
         niche_name: Optional[str] = None,
     ):
         if isinstance(parcellation_index, int):

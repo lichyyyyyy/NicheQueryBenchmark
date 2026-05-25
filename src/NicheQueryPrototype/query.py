@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 from scipy.spatial.distance import jensenshannon
-from scipy.stats import spearmanr
+from scipy.stats import pearsonr, spearmanr
 from sklearn.cluster import KMeans
 from sklearn.metrics import (
     adjusted_rand_score,
@@ -36,6 +36,18 @@ from src.NicheQueryPrototype.rm_ideal import RmIdeal
 def _as_1d_float64(a: np.ndarray) -> np.ndarray:
     """1-D float64 vector for metrics / correlation (avoids (N,1) vs (N,) corrcoef issues)."""
     return np.asarray(a, dtype=np.float64).reshape(-1)
+
+
+def _pearson_r(x: np.ndarray, y: np.ndarray) -> float:
+    """Pearson r between two 1-D score vectors; ``nan`` if undefined."""
+    a = _as_1d_float64(x)
+    b = _as_1d_float64(y)
+    if a.size != b.size or a.size < 2:
+        return float("nan")
+    if np.std(a) <= 0.0 or np.std(b) <= 0.0:
+        return float("nan")
+    r, _ = pearsonr(a, b)
+    return float(r)
 
 
 def _k_for_top_fraction(n: int, frac: float) -> int:
@@ -106,10 +118,15 @@ def _ndcg_at_fractions(
 
 
 def _rm_top_pct_fraction(top_pct: float) -> float:
-    """``top_pct`` as percent (e.g. 5 → 5%) or fraction in (0, 1] (e.g. 0.05 → 5%)."""
+    """
+    Map ``top_pct`` to a fraction in (0, 1].
+
+    - ``>= 1`` → percent (e.g. ``1`` → 1%, ``5`` → 5%, ``100`` → 100%).
+    - ``< 1`` → already a fraction (e.g. ``0.01`` → 1%).
+    """
     if not np.isfinite(top_pct) or top_pct <= 0:
         raise ValueError(f"top_pct must be a positive finite float, got {top_pct!r}")
-    if top_pct > 1.0:
+    if top_pct >= 1.0:
         return float(top_pct) / 100.0
     return float(top_pct)
 
@@ -769,6 +786,10 @@ class NicheQuery:
         proxy top-K by ``rm_ideal_score``; ``K = max(1, ceil(Q·n_cells))`` for
         ``Q`` in ``{1%, 5%, 10%}``. Ranking-based, not a fixed score threshold.
         ``nan`` when ``rm_ideal_score`` is missing.
+
+        **Pearson** (``pearson``): Pearson r between niche-query cosine similarity and
+        ``rm_ideal_score`` (pooled and per sample). ``pcc`` uses the same ``y_true`` as
+        above (RM-Ideal when present, else parcellation mask).
         """
         score_list: List[np.ndarray] = []
         y_true_list: List[np.ndarray] = []
@@ -804,10 +825,7 @@ class NicheQuery:
         is_binary = len(uniq_y) <= 2 and np.all(np.isin(uniq_y, [0.0, 1.0]))
         if is_binary and len(uniq_y) >= 2:
             auprc = float(average_precision_score(y_true.astype(int), y_score))
-            if y_true.size >= 2 and np.std(y_true) > 0.0 and np.std(y_score) > 0.0:
-                pcc = float(np.corrcoef(y_true, y_score)[0, 1])
-            else:
-                pcc = float("nan")
+            pcc = _pearson_r(y_true, y_score)
             spearman = float("nan")
             mae = float("nan")
             rmse = float("nan")
@@ -819,10 +837,7 @@ class NicheQuery:
                 "target_parcellation_mask; continuous rm_ideal_score will not produce AUPRC.",
                 len(uniq_y),
             )
-            if y_true.size >= 2 and np.std(y_true) > 0.0 and np.std(y_score) > 0.0:
-                pcc = float(np.corrcoef(y_true, y_score)[0, 1])
-            else:
-                pcc = float("nan")
+            pcc = _pearson_r(y_true, y_score)
             if y_true.size >= 2 and np.std(y_true) > 0.0 and np.std(y_score) > 0.0:
                 spearman = float(spearmanr(y_true, y_score).statistic)
             else:
@@ -883,9 +898,18 @@ class NicheQuery:
                 "overlap_at_10pct": float("nan"),
             }
 
+        if pred_ndcg_parts:
+            pearson_pooled = _pearson_r(
+                _as_1d_float64(np.concatenate(pred_ndcg_parts, axis=0)),
+                _as_1d_float64(np.concatenate(rel_ndcg_parts, axis=0)),
+            )
+        else:
+            pearson_pooled = float("nan")
+
         total: Dict[str, float] = {
             "auprc": auprc,
             "pcc": pcc,
+            "pearson": pearson_pooled,
             "spearman": spearman,
             "mae": mae,
             "rmse": rmse,
@@ -908,19 +932,13 @@ class NicheQuery:
             is_binary_s = len(uniq_yt) <= 2 and np.all(np.isin(uniq_yt, [0.0, 1.0]))
             if is_binary_s and len(uniq_yt) >= 2:
                 auprc_s = float(average_precision_score(yt.astype(int), y_score_s))
-                if yt.size >= 2 and np.std(yt) > 0.0 and np.std(y_score_s) > 0.0:
-                    pcc_s = float(np.corrcoef(yt, y_score_s)[0, 1])
-                else:
-                    pcc_s = float("nan")
+                pcc_s = _pearson_r(yt, y_score_s)
                 spearman_s = float("nan")
                 mae_s = float("nan")
                 rmse_s = float("nan")
             else:
                 auprc_s = float("nan")
-                if yt.size >= 2 and np.std(yt) > 0.0 and np.std(y_score_s) > 0.0:
-                    pcc_s = float(np.corrcoef(yt, y_score_s)[0, 1])
-                else:
-                    pcc_s = float("nan")
+                pcc_s = _pearson_r(yt, y_score_s)
                 if yt.size >= 2 and np.std(yt) > 0.0 and np.std(y_score_s) > 0.0:
                     spearman_s = float(spearmanr(yt, y_score_s).statistic)
                 else:
@@ -943,6 +961,7 @@ class NicheQuery:
             if rmv is not None:
                 ndcg_s = _ndcg_at_fractions(y_score_s, rmv)
                 overlap_s = _overlap_at_fractions(y_score_s, rmv)
+                pearson_s = _pearson_r(y_score_s, rmv)
             else:
                 ndcg_s = {
                     "ndcg_at_1pct": float("nan"),
@@ -954,12 +973,14 @@ class NicheQuery:
                     "overlap_at_5pct": float("nan"),
                     "overlap_at_10pct": float("nan"),
                 }
+                pearson_s = float("nan")
 
             per_sample.append(
                 {
                     "sample_id": s.id,
                     "auprc": auprc_s,
                     "pcc": pcc_s,
+                    "pearson": pearson_s,
                     "spearman": spearman_s,
                     "mae": mae_s,
                     "rmse": rmse_s,
@@ -979,9 +1000,13 @@ class NicheQuery:
 
         bench_msg = (
             f"Benchmark metrics ({len(samples)} samples) [total]: "
-            f"AUPRC={auprc:.4f}, PCC={pcc:.4f}, Spearman={spearman:.4f}, "
-            f"MAE={mae:.4f}, RMSE={rmse:.4f}, avg_NCJS={avg_ncjs:.4f}, "
-            f"AvgBIO={avg_bio:.4f}, AvgBATCH={avg_batch:.4f}"
+            f"AUPRC={auprc:.4f}, PCC={pcc:.4f}, Pearson={pearson_pooled:.4f}, "
+            f"Spearman={spearman:.4f}, MAE={mae:.4f}, RMSE={rmse:.4f}, "
+            f"avg_NCJS={avg_ncjs:.4f}, AvgBIO={avg_bio:.4f}, AvgBATCH={avg_batch:.4f}"
+        )
+        pearson_msg = (
+            f"Pearson r (niche_query vs rm_ideal, pooled): {pearson_pooled:.4f} "
+            f"(nan if no rm_ideal_score)"
         )
         ndcg_msg = (
             f"NDCG@K (niche_query vs rm_ideal, pooled): "
@@ -999,15 +1024,18 @@ class NicheQuery:
             f"nan if no rm_ideal_score)"
         )
         logger.info(bench_msg)
+        logger.info(pearson_msg)
         logger.info(ndcg_msg)
         logger.info(overlap_msg)
         _append_result_txt(result_txt_path, bench_msg + "\n")
+        _append_result_txt(result_txt_path, pearson_msg + "\n")
         _append_result_txt(result_txt_path, ndcg_msg + "\n")
         _append_result_txt(result_txt_path, overlap_msg + "\n")
         for row in per_sample:
             line = (
                 f"  [{row['sample_id']}] AUPRC={row['auprc']:.4f}, PCC={row['pcc']:.4f}, "
-                f"Spearman={row['spearman']:.4f}, MAE={row['mae']:.4f}, RMSE={row['rmse']:.4f}, "
+                f"Pearson={row['pearson']:.4f}, Spearman={row['spearman']:.4f}, "
+                f"MAE={row['mae']:.4f}, RMSE={row['rmse']:.4f}, "
                 f"avg_NCJS={row['avg_ncjs']:.4f}, AvgBIO={row['avg_bio']:.4f}, "
                 f"AvgBATCH={row['avg_batch']:.4f}, "
                 f"NDCG@1%={row['ndcg_at_1pct']:.4f}, NDCG@5%={row['ndcg_at_5pct']:.4f}, "
@@ -1042,9 +1070,10 @@ class NicheQuery:
         """
         Run ``generate_niche_features_and_parcellation_mask`` then benchmark metrics.
 
-        Includes **NDCG@K** and **Overlap@Q** at top 1%, 5%, and 10% of cells (by count),
-        comparing niche-query ranking to proxy ``rm_ideal_score`` top-K sets; see
-        :meth:`niche_query_with_benchmark_metrics_report`.
+        Includes **Pearson** r (niche-query cosine vs ``rm_ideal_score``), **NDCG@K**,
+        and **Overlap@Q** at top 1%, 5%, and 10% of cells (by count); see
+        :meth:`niche_query_with_benchmark_metrics_report`. Per-sample dicts include
+        ``pearson``, ``pcc``, ``spearman``, and related benchmark keys.
         """
         self.generate_niche_features_and_parcellation_mask(search_samples)
         out = self.niche_query_with_benchmark_metrics_report(
@@ -1216,7 +1245,7 @@ class NicheQuery:
                             vmax=1.0,
                             cmap=target_rm_cmap,
                             na_color="#d9d9d9",
-                            colorbar=col == n - 1,
+                            colorbar_loc="right" if col == n - 1 else None,
                             title=f"Top {pct:g}% RM-Ideal\n{sample.id}",
                         )
                 pct_labels = ", ".join(f"{p:g}%" for p in top_pct_list)
