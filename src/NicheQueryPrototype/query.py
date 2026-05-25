@@ -157,12 +157,22 @@ def _target_niches_obs_key_for_pct(pct: float) -> str:
     return f"target_niches_top_{label}pct"
 
 
-def _set_target_niches_top_pct_categorical(
+def _set_target_niches_top_pct_scores(
     sample: Sample, rm_score: np.ndarray, pct: float, obs_key: str
 ) -> None:
-    top_mask = _top_fraction_mask_by_score(rm_score, pct)
-    labels = ["target" if top_mask[i] else "—" for i in range(len(sample.cells))]
-    sample.adata.obs[obs_key] = pd.Categorical(labels, categories=["—", "target"])
+    """
+    Top ``pct``% cells by RM-Ideal get clipped scores in [0, 1]; others NaN (plotted gray).
+    """
+    rm = _as_1d_float64(rm_score)
+    rm_vis = np.clip(rm, 0.0, 1.0)
+    top_mask = _top_fraction_mask_by_score(rm, pct)
+    scores_out = np.full(rm.size, np.nan, dtype=np.float64)
+    scores_out[top_mask] = rm_vis[top_mask]
+    sample.adata.obs[obs_key] = (
+        pd.Series(scores_out, index=[c.id for c in sample.cells])
+        .reindex(sample.adata.obs_names)
+        .to_numpy(dtype=np.float64)
+    )
 
 
 def _spatial_viz_figure(
@@ -190,6 +200,27 @@ def _spatial_viz_figure(
     for j in range(n_panels, len(axes_flat)):
         axes_flat[j].set_axis_off()
     return fig, axes_flat
+
+
+def _spatial_viz_figure_grid(
+    nrows: int,
+    ncols: int,
+    *,
+    panel_width_in: float = 2.75,
+    panel_height_in: float = 2.75,
+) -> Tuple[Any, np.ndarray]:
+    """
+    One figure with a 2D ``axes`` array (``nrows`` × ``ncols``) for spatial subplots.
+    """
+    nrows = max(1, int(nrows))
+    ncols = max(1, int(ncols))
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(panel_width_in * ncols, panel_height_in * nrows),
+        squeeze=False,
+    )
+    return fig, np.asarray(axes)
 
 
 def _append_result_txt(path: Optional[str], text: str) -> None:
@@ -944,15 +975,22 @@ class NicheQuery:
         *,
         viz_max_cols: int = 6,
         viz_panel_size_in: Tuple[float, float] = (2.75, 2.75),
+        target_viz_panel_size_in: Tuple[float, float] = (4.5, 4.5),
+        target_spot_size: Optional[float] = None,
+        target_rm_cmap: str = "viridis",
     ) -> None:
         """
         Visualize niche-query cosine scores per sample; optionally plot target niches.
 
         If ``show_target_niches`` and ``rm_target_top_pct`` is set (e.g. ``[1, 5, 10]``),
-        one figure is drawn per top-% threshold: cells in the top K% by ``rm_ideal_score``
-        are highlighted, others gray. Requires ``compute_rm_ideal_score``. A single float
-        is treated as a one-element list. Without ``rm_target_top_pct``, RM-Ideal targets
-        use continuous scores; otherwise parcellation mask defines targets.
+        one combined figure is drawn: each row is a top-% threshold, each column is a
+        sample. Cells outside the top K% are gray; top-K cells are colored by RM-Ideal
+        score in [0, 1]. Requires ``compute_rm_ideal_score``. A single float is treated
+        as a one-element list. Without ``rm_target_top_pct``, RM-Ideal targets use
+        continuous scores; otherwise parcellation mask defines targets.
+
+        ``target_viz_panel_size_in`` and ``target_spot_size`` control the larger target-
+        niche grid (defaults are bigger than the niche-query panels).
         """
         top_pct_list = (
             _normalize_rm_target_top_pct_list(rm_target_top_pct)
@@ -986,7 +1024,7 @@ class NicheQuery:
                     )
                 if use_rm_top_pct_list:
                     for pct in top_pct_list:
-                        _set_target_niches_top_pct_categorical(
+                        _set_target_niches_top_pct_scores(
                             sample,
                             rm_score,
                             pct,
@@ -1042,24 +1080,31 @@ class NicheQuery:
 
         if show_target_niches:
             target_palette = ["#d9d9d9", "#d62728"]
+            tpw, tph = target_viz_panel_size_in
+            t_spot = (
+                float(target_spot_size)
+                if target_spot_size is not None
+                else max(spot_size, 0.04)
+            )
             if use_rm_top_pct_list:
-                for pct in top_pct_list:
+                n_pct = len(top_pct_list)
+                fig, axes_grid = _spatial_viz_figure_grid(
+                    n_pct,
+                    n,
+                    panel_width_in=tpw,
+                    panel_height_in=tph,
+                )
+                for row, pct in enumerate(top_pct_list):
                     obs_key = _target_niches_obs_key_for_pct(pct)
-                    fig, axes = _spatial_viz_figure(
-                        n,
-                        max_cols=viz_max_cols,
-                        panel_width_in=pw,
-                        panel_height_in=ph,
-                    )
-                    for i, sample in enumerate(search_samples):
+                    for col, sample in enumerate(search_samples):
+                        ax = axes_grid[row, col]
                         if obs_key not in sample.adata.obs.columns:
                             if sample.rm_ideal_score is None:
-                                sample.adata.obs[obs_key] = pd.Categorical(
-                                    ["—"] * len(sample.cells),
-                                    categories=["—", "target"],
+                                sample.adata.obs[obs_key] = np.full(
+                                    sample.adata.n_obs, np.nan, dtype=np.float64
                                 )
                             else:
-                                _set_target_niches_top_pct_categorical(
+                                _set_target_niches_top_pct_scores(
                                     sample,
                                     _as_1d_float64(
                                         np.asarray(sample.rm_ideal_score, dtype=float)
@@ -1070,16 +1115,23 @@ class NicheQuery:
                         sc.pl.spatial(
                             sample.adata,
                             color=obs_key,
-                            ax=axes[i],
+                            ax=ax,
                             show=False,
-                            spot_size=spot_size,
-                            palette=target_palette,
+                            spot_size=t_spot,
+                            vmin=0.0,
+                            vmax=1.0,
+                            cmap=target_rm_cmap,
+                            na_color="#d9d9d9",
+                            colorbar=col == n - 1,
                             title=f"Top {pct:g}% RM-Ideal\n{sample.id}",
                         )
-                    fig.suptitle(
-                        f"Target niches (top {pct:g}% by RM-Ideal score)", fontsize=18
-                    )
-                    plt.tight_layout()
+                pct_labels = ", ".join(f"{p:g}%" for p in top_pct_list)
+                fig.suptitle(
+                    f"Target niches by RM-Ideal top-% ({pct_labels}; color in [0, 1])",
+                    fontsize=18,
+                )
+                fig.subplots_adjust(top=0.93, hspace=0.28, wspace=0.12)
+                plt.tight_layout()
             else:
                 fig, axes = _spatial_viz_figure(
                     n,
