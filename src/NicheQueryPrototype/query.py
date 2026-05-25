@@ -128,6 +128,57 @@ def _top_fraction_mask_by_score(scores: np.ndarray, top_pct: float) -> np.ndarra
     return mask
 
 
+def _top_k_indices_by_score(scores: np.ndarray, top_pct: float) -> np.ndarray:
+    """Cell indices of the top ``top_pct`` fraction by score (higher is better)."""
+    s = _as_1d_float64(scores)
+    n = s.size
+    if n == 0:
+        return np.zeros(0, dtype=int)
+    frac = _rm_top_pct_fraction(top_pct)
+    k = _k_for_top_fraction(n, frac)
+    order = np.argsort(-s, kind="mergesort")
+    return order[:k].astype(int)
+
+
+def _overlap_at_fractions(
+    pred_scores: np.ndarray, proxy_scores: np.ndarray
+) -> Dict[str, float]:
+    """
+    Overlap@Q for Q = top 1%, 5%, 10% of cells (same K rule as NDCG).
+
+    Overlap@Q = |TopK(niche_query) ∩ TopK(rm_ideal)| / K.
+    """
+    pred = _as_1d_float64(pred_scores)
+    proxy = _as_1d_float64(proxy_scores)
+    if pred.size != proxy.size:
+        raise ValueError(
+            f"pred_scores and proxy_scores must have the same length, "
+            f"got {pred.size} vs {proxy.size}"
+        )
+    n = pred.size
+    out: Dict[str, float] = {}
+    if n == 0:
+        for key in ("overlap_at_1pct", "overlap_at_5pct", "overlap_at_10pct"):
+            out[key] = float("nan")
+        return out
+
+    for frac, key in (
+        (0.01, "overlap_at_1pct"),
+        (0.05, "overlap_at_5pct"),
+        (0.10, "overlap_at_10pct"),
+    ):
+        top_pct = frac * 100.0
+        a_k = _top_k_indices_by_score(pred, top_pct)
+        b_k = _top_k_indices_by_score(proxy, top_pct)
+        k = int(a_k.size)
+        if k == 0:
+            out[key] = float("nan")
+        else:
+            inter = len(set(a_k.tolist()) & set(b_k.tolist()))
+            out[key] = float(inter) / float(k)
+    return out
+
+
 def _normalize_rm_target_top_pct_list(
     v: Optional[Union[float, int, List[float]]],
 ) -> List[float]:
@@ -712,6 +763,12 @@ class NicheQuery:
         ``max(1, ceil(frac * n_cells))`` for ``frac`` in ``{0.01, 0.05, 0.10}``.
         Pooled values concatenate all such samples. If ``rm_ideal_score`` is missing,
         per-sample NDCG is ``nan``.
+
+        **Overlap@Q** (``overlap_at_1pct``, ``overlap_at_5pct``, ``overlap_at_10pct``):
+        fraction of the model's top-K cells (by niche-query score) that also lie in the
+        proxy top-K by ``rm_ideal_score``; ``K = max(1, ceil(Q·n_cells))`` for
+        ``Q`` in ``{1%, 5%, 10%}``. Ranking-based, not a fixed score threshold.
+        ``nan`` when ``rm_ideal_score`` is missing.
         """
         score_list: List[np.ndarray] = []
         y_true_list: List[np.ndarray] = []
@@ -814,6 +871,18 @@ class NicheQuery:
                 "ndcg_at_10pct": float("nan"),
             }
 
+        if pred_ndcg_parts:
+            overlap_pooled = _overlap_at_fractions(
+                _as_1d_float64(np.concatenate(pred_ndcg_parts, axis=0)),
+                _as_1d_float64(np.concatenate(rel_ndcg_parts, axis=0)),
+            )
+        else:
+            overlap_pooled = {
+                "overlap_at_1pct": float("nan"),
+                "overlap_at_5pct": float("nan"),
+                "overlap_at_10pct": float("nan"),
+            }
+
         total: Dict[str, float] = {
             "auprc": auprc,
             "pcc": pcc,
@@ -826,6 +895,9 @@ class NicheQuery:
             "ndcg_at_1pct": ndcg_pooled["ndcg_at_1pct"],
             "ndcg_at_5pct": ndcg_pooled["ndcg_at_5pct"],
             "ndcg_at_10pct": ndcg_pooled["ndcg_at_10pct"],
+            "overlap_at_1pct": overlap_pooled["overlap_at_1pct"],
+            "overlap_at_5pct": overlap_pooled["overlap_at_5pct"],
+            "overlap_at_10pct": overlap_pooled["overlap_at_10pct"],
         }
 
         per_sample: List[Dict[str, Any]] = []
@@ -870,11 +942,17 @@ class NicheQuery:
             rmv = rm_ideal_for_ndcg_list[i]
             if rmv is not None:
                 ndcg_s = _ndcg_at_fractions(y_score_s, rmv)
+                overlap_s = _overlap_at_fractions(y_score_s, rmv)
             else:
                 ndcg_s = {
                     "ndcg_at_1pct": float("nan"),
                     "ndcg_at_5pct": float("nan"),
                     "ndcg_at_10pct": float("nan"),
+                }
+                overlap_s = {
+                    "overlap_at_1pct": float("nan"),
+                    "overlap_at_5pct": float("nan"),
+                    "overlap_at_10pct": float("nan"),
                 }
 
             per_sample.append(
@@ -891,6 +969,9 @@ class NicheQuery:
                     "ndcg_at_1pct": ndcg_s["ndcg_at_1pct"],
                     "ndcg_at_5pct": ndcg_s["ndcg_at_5pct"],
                     "ndcg_at_10pct": ndcg_s["ndcg_at_10pct"],
+                    "overlap_at_1pct": overlap_s["overlap_at_1pct"],
+                    "overlap_at_5pct": overlap_s["overlap_at_5pct"],
+                    "overlap_at_10pct": overlap_s["overlap_at_10pct"],
                 }
             )
 
@@ -909,10 +990,20 @@ class NicheQuery:
             f"@10%={ndcg_pooled['ndcg_at_10pct']:.4f} "
             f"(K=ceil(frac·n_cells) per slice; nan if no rm_ideal_score)"
         )
+        overlap_msg = (
+            f"Overlap@Q (proxy top-K, pooled): "
+            f"@1%={overlap_pooled['overlap_at_1pct']:.4f}, "
+            f"@5%={overlap_pooled['overlap_at_5pct']:.4f}, "
+            f"@10%={overlap_pooled['overlap_at_10pct']:.4f} "
+            f"(K=ceil(Q·n_cells); |TopK(niche_query)∩TopK(rm_ideal)|/K; "
+            f"nan if no rm_ideal_score)"
+        )
         logger.info(bench_msg)
         logger.info(ndcg_msg)
+        logger.info(overlap_msg)
         _append_result_txt(result_txt_path, bench_msg + "\n")
         _append_result_txt(result_txt_path, ndcg_msg + "\n")
+        _append_result_txt(result_txt_path, overlap_msg + "\n")
         for row in per_sample:
             line = (
                 f"  [{row['sample_id']}] AUPRC={row['auprc']:.4f}, PCC={row['pcc']:.4f}, "
@@ -920,7 +1011,10 @@ class NicheQuery:
                 f"avg_NCJS={row['avg_ncjs']:.4f}, AvgBIO={row['avg_bio']:.4f}, "
                 f"AvgBATCH={row['avg_batch']:.4f}, "
                 f"NDCG@1%={row['ndcg_at_1pct']:.4f}, NDCG@5%={row['ndcg_at_5pct']:.4f}, "
-                f"NDCG@10%={row['ndcg_at_10pct']:.4f}"
+                f"NDCG@10%={row['ndcg_at_10pct']:.4f}, "
+                f"Overlap@1%={row['overlap_at_1pct']:.4f}, "
+                f"Overlap@5%={row['overlap_at_5pct']:.4f}, "
+                f"Overlap@10%={row['overlap_at_10pct']:.4f}"
             )
             logger.info(line)
             _append_result_txt(result_txt_path, line + "\n")
@@ -948,8 +1042,8 @@ class NicheQuery:
         """
         Run ``generate_niche_features_and_parcellation_mask`` then benchmark metrics.
 
-        Includes **NDCG@K** (K = top 1%, 5%, 10% of cells by count) comparing
-        niche-query cosine scores to ``rm_ideal_score`` when the latter exists; see
+        Includes **NDCG@K** and **Overlap@Q** at top 1%, 5%, and 10% of cells (by count),
+        comparing niche-query ranking to proxy ``rm_ideal_score`` top-K sets; see
         :meth:`niche_query_with_benchmark_metrics_report`.
         """
         self.generate_niche_features_and_parcellation_mask(search_samples)
