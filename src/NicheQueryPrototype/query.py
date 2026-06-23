@@ -517,7 +517,7 @@ class NicheQuery:
 
             # (2) parcellation mask
             sample.target_parcellation_mask = self.get_parcellation_mask(
-                sample, self.niche.parcellation_index
+                sample, self.niche.unique_parcellation_indices
             )
 
             # (3) KNN graph in feature space
@@ -548,6 +548,9 @@ class NicheQuery:
         If ``overwrite`` is False, existing ``sample.rm_ideal_score`` is reused
         when present and shape-aligned.
 
+        Samples that do not contain every parcellation present in the query niche
+        receive an all-zero score vector (cached scores are ignored in that case).
+
         Parameters
         ----------
         rm_ideal_post_transform
@@ -574,6 +577,7 @@ class NicheQuery:
             temperature=rm_ideal_temperature,
         )
         query_niche_cells = self.niche.cells
+        required_parcellations = set(self.niche.unique_parcellation_indices)
         n_samples = len(samples)
         t0_all = time.perf_counter()
         logger.info(
@@ -596,7 +600,16 @@ class NicheQuery:
                 len(sample.cells),
             )
             used_cached = False
-            if not overwrite and sample.rm_ideal_score is not None:
+            sample_parcellations = {c.parcellation_index for c in sample.cells}
+            if not required_parcellations.issubset(sample_parcellations):
+                missing = sorted(required_parcellations - sample_parcellations)
+                logger.info(
+                    "Sample %r missing query parcellation(s) %s; setting RM-Ideal scores to 0.",
+                    sample.id,
+                    missing,
+                )
+                scores = np.zeros(len(sample.cells), dtype=float)
+            elif not overwrite and sample.rm_ideal_score is not None:
                 cached_scores = np.asarray(sample.rm_ideal_score, dtype=float).reshape(
                     -1
                 )
@@ -1172,7 +1185,7 @@ class NicheQuery:
                 )
             sample.adata.uns.pop("target_niches_top_pct_list", None)
             target_mask = self.get_parcellation_mask(
-                sample, self.niche.parcellation_index
+                sample, self.niche.unique_parcellation_indices
             )
             target_cells = [
                 cell for idx, cell in enumerate(sample.cells) if target_mask[idx] == 1

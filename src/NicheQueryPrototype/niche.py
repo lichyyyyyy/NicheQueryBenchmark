@@ -27,15 +27,10 @@ def _parcellation_display_label(c: Cell) -> str:
 def _niche_highlight_parcellation_set(niche: "Niche") -> set[int]:
     """
     Parcellation indices to color in ``visualize``; all other spots use gray.
-    ``niche.parcellation_index`` may be int (e.g. center cell) or list (k-hop allowlist).
+    Derived from ``niche.parcellation_index`` (one entry per niche cell).
     """
-    p = niche.parcellation_index
-    if isinstance(p, (list, tuple, set)):
-        s = {int(x) for x in p}
-        if s:
-            return s
-    elif isinstance(p, int):
-        return {p}
+    if niche.parcellation_index:
+        return {int(x) for x in niche.parcellation_index}
     return {c.parcellation_index for c in niche.cells}
 
 
@@ -75,8 +70,8 @@ class Niche:
         # Neighborhood size parameter
         self.k = 0
 
-        # [Required] Parcellation index for this niche
-        self.parcellation_index = 0
+        # [Required] Parcellation index per niche cell (parallel to self.cells)
+        self.parcellation_index: List[int] = []
 
         # Maximum number of cells allowed in the niche
         self.cell_limit = 0
@@ -84,6 +79,14 @@ class Niche:
         # The center cell of the niche (optional)
         self.center_cell = None
         self.feature = None
+
+    def _sync_parcellation_indices(self) -> None:
+        self.parcellation_index = [c.parcellation_index for c in self.cells]
+
+    @property
+    def unique_parcellation_indices(self) -> List[int]:
+        """Distinct parcellation indices present in this niche."""
+        return sorted(set(self.parcellation_index))
 
     def compute_niche_feature(self):
         assert len(self.cells) > 0, "Empty cells in the niche"
@@ -97,6 +100,7 @@ class Niche:
     def construct(self, cells: List[Cell], sample_id: str):
         self.cells = cells
         self.sample_id = sample_id
+        self._sync_parcellation_indices()
 
     """
     Construct a niche by parcellation index.
@@ -115,17 +119,18 @@ class Niche:
         if center_cell is not None:
             self.center_cell = center_cell
             self.sample_id = center_cell.sample_id
-            self.parcellation_index = center_cell.parcellation_index
+            target_parcellation = center_cell.parcellation_index
             self.cells.append(center_cell)
         elif sample_id is not None and parcellation_index is not None:
             self.sample_id = sample_id
-            self.parcellation_index = parcellation_index
+            target_parcellation = parcellation_index
         sample = db.get_sample(self.sample_id)
-        assert sample is None, f"Sample {self.sample_id} not found."
+        assert sample is not None, f"Sample {self.sample_id} not found."
 
         for cell in sample.cells:
-            if cell.parcellation_index == self.parcellation_index:
+            if cell.parcellation_index == target_parcellation:
                 self.cells.append(cell)
+        self._sync_parcellation_indices()
         self.compute_niche_feature()
         logger.info(
             f"Constructed a niche with {len(self.cells)} cells on {self.sample_id} slice."
@@ -159,16 +164,10 @@ class Niche:
         if center_cell_id is not None and db.get_cell(center_cell_id) is not None:
             self.center_cell = db.get_cell(center_cell_id)
             self.sample_id = self.center_cell.sample_id
-            self.parcellation_index = self.center_cell.parcellation_index
         elif sample_id is not None and parcellation_index is not None:
             self.sample_id = sample_id
-            # Keep a representative value for display/logging when constructed from a list.
-            self.parcellation_index = (
-                parcellation_index[0] if len(parcellation_index) > 0 else -1
-            )
 
         self.k = k
-        self.parcellation_index = parcellation_index
         self.cell_limit = cell_limit
         sample = db.get_sample(self.sample_id)
         assert sample is not None, f"Sample {self.sample_id} not found."
@@ -211,6 +210,7 @@ class Niche:
         else:
             self.cells.extend(neighbour_cells)
 
+        self._sync_parcellation_indices()
         logger.info("Computing niche feature..")
         self.compute_niche_feature()
         logger.info(
@@ -321,7 +321,7 @@ class Niche:
             title=f"Niche by parcellation ({sample.id})",
         )
 
-        # Full sample: only spots whose parcellation_index is in niche.parcellation_index; else gray.
+        # Full sample: only spots whose parcellation_index is in the niche; else gray.
         id_to_full_cell = {str(c.id): c for c in sample.cells}
         sample_pidx_labels: List[str] = []
         for oid in sample.adata.obs_names:

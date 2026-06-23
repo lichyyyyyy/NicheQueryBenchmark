@@ -602,6 +602,390 @@ class Database:
                     sample.id,
                 )
 
+    @staticmethod
+    def _infer_sample_id_from_adata(adata: AnnData) -> str:
+        """
+        Best-effort sample id for a per-sample AnnData.
+
+        Preference order:
+        - ``adata.uns["library_id"]`` (common Scanpy convention)
+        - unique value from ``adata.obs["sample_id"]`` (if present)
+        - ``"sample"``
+        """
+        lib = adata.uns.get("library_id")
+        if lib is not None and str(lib).strip():
+            return str(lib)
+        if "sample_id" in adata.obs.columns:
+            vals = pd.unique(adata.obs["sample_id"].astype(str))
+            vals = [v for v in vals if str(v).strip() and v.lower() != "nan"]
+            if len(vals) == 1:
+                return str(vals[0])
+        return "sample"
+
+    @staticmethod
+    def _parse_parcellation_obs_to_int(
+        par_raw: pd.Series, *, missing_value: int = 0
+    ) -> np.ndarray:
+        """
+        Parse a parcellation column to integer ids.
+
+        Supports common formats seen in benchmark `.h5ad` files:
+        - ints / floats
+        - strings like ``"123: Area postrema"`` (leading integer before ':')
+        - placeholders like ``"—"`` or empty / NA (mapped to ``missing_value``)
+
+        Returns an ``int`` numpy array of length ``n_obs`` with **non-negative** ids
+        (required by downstream ``np.bincount`` usage).
+        """
+        # First try direct numeric conversion.
+        num = pd.to_numeric(par_raw, errors="coerce")
+        out = num.to_numpy(dtype=float)
+
+        # For non-numeric entries, attempt to parse a leading integer prefix.
+        mask_bad = ~np.isfinite(out)
+        if np.any(mask_bad):
+            s = par_raw.astype(str)
+            # Normalize common placeholders.
+            s = s.replace({"—": "", "nan": "", "None": "", "NA": "", "N/A": ""})
+            # Extract the first integer substring (e.g. "123" from "123: Foo").
+            extracted = s.str.extract(r"^\s*(\d+)", expand=False)
+            ex_num = pd.to_numeric(extracted, errors="coerce").to_numpy(dtype=float)
+            fill = np.where(np.isfinite(ex_num), ex_num, float(missing_value))
+            out[mask_bad] = fill[mask_bad]
+
+        out_int = out.astype(int, copy=False)
+        # Enforce non-negative ids for bincount-based code paths.
+        if np.any(out_int < 0):
+            out_int = np.where(out_int < 0, int(missing_value), out_int).astype(int)
+        return out_int
+
+    def construct_from_sample_adatas(
+        self,
+        sample_adatas: Union[List[AnnData], Dict[str, AnnData]],
+        feature_name: str,
+        *,
+        parcellation_path: Optional[str] = None,
+        parcellation_obs_key: Optional[str] = None,
+        ccf_coordinates_path: Optional[List[str]] = None,
+        parcellation_write_obs_key: str = "parcellation_index",
+        spatial_obsm_key: str = "spatial",
+        z_obs_key: Optional[str] = None,
+        rm_ideal_output_key: str = "rm_ideal_score",
+        preserve_input_adata: bool = True,
+    ) -> None:
+        """
+        Construct the database directly from per-sample :class:`~anndata.AnnData` objects.
+
+        This is a lightweight alternative to :meth:`construct` when the needed metadata
+        already lives in each sample's AnnData:
+
+        - coordinates in ``adata.obsm[spatial_obsm_key]`` (uses first two columns as x,y)
+        - parcellation id in ``adata.obs[parcellation_obs_key]`` (int-like)
+        - sample id inferred from the dict key / ``adata.uns["library_id"]`` / ``adata.obs["sample_id"]``
+        - features from either ``adata.X`` (when ``feature_name == "gene_expression"``) or
+          ``adata.obsm[feature_name]`` (embedding)
+
+        Parameters
+        ----------
+        sample_adatas
+            Either a list of AnnData (sample_id is inferred) or a dict mapping
+            explicit ``sample_id -> AnnData``.
+        feature_name
+            ``"gene_expression"`` to use ``adata.X``; otherwise uses ``adata.obsm[feature_name]``.
+        parcellation_path
+            Optional CCF structure JSON. When provided, fills ``cell.parcellation_info``.
+        parcellation_obs_key
+            Optional column in ``adata.obs`` holding parcellation ids. If not provided
+            (default), the constructor will auto-detect one of:
+            ``"parcellation_index"``, ``"sample_parcellation_index"``, or
+            ``"niche_parcellation"``. If none exist, parcellation ids default to 0
+            for all cells (unassigned).
+        ccf_coordinates_path
+            Optional list of CCF coordinate CSV paths that include per-cell parcellation
+            ids. When ``parcellation_obs_key`` is None, and these files contain columns
+            ``cell_label`` and ``parcellation_index``, the constructor will load
+            parcellation ids from the coordinates table (matched by ``adata.obs_names``).
+        parcellation_write_obs_key
+            When ``preserve_input_adata`` is True, the parsed per-cell parcellation
+            integer ids are written to ``sample.adata.obs[parcellation_write_obs_key]``.
+        spatial_obsm_key
+            Key in ``adata.obsm`` holding spatial coordinates.
+        z_obs_key
+            Optional column in ``adata.obs`` for z coordinate; otherwise z=0.
+        rm_ideal_output_key
+            If present in ``adata.obs``, loads per-cell values into ``sample.rm_ideal_score``.
+        preserve_input_adata
+            If True (default), keep each sample's original AnnData object (plus any gene
+            subsetting for shared genes) as ``sample.adata`` so that custom fields in
+            ``.obs`` / ``.obsm`` (e.g. query niche masks) are preserved. If False, rebuild a
+            minimal AnnData from ``Cell`` objects via :meth:`Sample.construct_adata`.
+        """
+        # Reset any prior state.
+        self.cells = []
+        self.samples = {}
+        self.merged_cell_metadata = pd.DataFrame()
+
+        if parcellation_path is not None:
+            logger.info("Constructing parcellation tree...")
+            self.parcellation_tree = self.parse_parcellation_structure(
+                parcellation_path
+            )
+        else:
+            self.parcellation_tree = {}
+
+        if isinstance(sample_adatas, dict):
+            items = list(sample_adatas.items())
+        else:
+            items = [
+                (self._infer_sample_id_from_adata(ad), ad) for ad in list(sample_adatas)
+            ]
+
+        if not items:
+            raise ValueError("sample_adatas is empty; nothing to construct.")
+
+        # If gene expression, align genes across samples (intersection) like construct(...).
+        if feature_name == "gene_expression":
+            name_sets = [set(ad.var_names.astype(str)) for _, ad in items]
+            common_genes = sorted(set.intersection(*name_sets))
+            if not common_genes:
+                raise ValueError(
+                    "No overlapping gene names across sample AnnData objects. "
+                    "Cannot align ``gene_expression`` features."
+                )
+            logger.info(
+                "Gene expression: using %d common genes across %d sample(s).",
+                len(common_genes),
+                len(items),
+            )
+            items = [(sid, ad[:, common_genes].copy()) for sid, ad in items]
+
+        logger.info(
+            "Constructing database from %d sample AnnData object(s)...", len(items)
+        )
+        meta_rows: List[Dict[str, Any]] = []
+
+        par_by_cell_label: Optional[Dict[str, int]] = None
+        if ccf_coordinates_path:
+            logger.info("Loading CCF coordinates for parcellation lookup...")
+            # Only load rows for the cells actually present in sample_adatas (fast + memory-safe).
+            allowed_cell_labels: set[str] = set()
+            for _, adata in items:
+                allowed_cell_labels.update(adata.obs_names.astype(str).tolist())
+            logger.info(
+                "CCF parcellation lookup: collecting %d unique cell_label(s) from input AnnData.",
+                len(allowed_cell_labels),
+            )
+
+            parts: List[pd.DataFrame] = []
+            for path in ccf_coordinates_path:
+                # Stream in chunks to avoid reading multi-million-line CSVs into memory.
+                for chunk in pd.read_csv(
+                    path,
+                    chunksize=_METADATA_CSV_CHUNKSIZE,
+                    usecols=["cell_label", "parcellation_index"],
+                ):
+                    chunk["cell_label"] = chunk["cell_label"].astype(str)
+                    sub = chunk[chunk["cell_label"].isin(allowed_cell_labels)]
+                    if not sub.empty:
+                        parts.append(sub)
+            if parts:
+                md = pd.concat(parts, axis=0, ignore_index=True)
+                md.drop_duplicates(subset=["cell_label"], inplace=True)
+                par_ser = pd.to_numeric(md["parcellation_index"], errors="coerce").fillna(0)
+                par_by_cell_label = dict(
+                    zip(
+                        md["cell_label"].astype(str).to_numpy(),
+                        par_ser.astype(int).to_numpy(),
+                    )
+                )
+                logger.info(
+                    "Loaded parcellation_index for %d/%d cells from CCF coordinates.",
+                    len(par_by_cell_label),
+                    len(allowed_cell_labels),
+                )
+            else:
+                logger.warning(
+                    "CCF coordinates provided but no matching cell_label rows were found; "
+                    "parcellation ids will fall back to auto-detected obs columns or 0."
+                )
+
+        for sample_id, adata in items:
+            logger.info(
+                "Sample %r: n_obs=%d, n_vars=%d (building Cells/Sample)...",
+                sample_id,
+                int(adata.n_obs),
+                int(adata.n_vars),
+            )
+            if sample_id in self.samples:
+                raise ValueError(
+                    f"Duplicate sample_id {sample_id!r} in sample_adatas; "
+                    "pass a dict with unique keys or ensure AnnData carry unique library_id."
+                )
+            if spatial_obsm_key not in adata.obsm:
+                raise KeyError(
+                    f"AnnData for sample {sample_id!r} is missing obsm[{spatial_obsm_key!r}]."
+                )
+
+            coords = np.asarray(adata.obsm[spatial_obsm_key])
+            if (
+                coords.ndim != 2
+                or coords.shape[0] != adata.n_obs
+                or coords.shape[1] < 2
+            ):
+                raise ValueError(
+                    f"AnnData for sample {sample_id!r}: obsm[{spatial_obsm_key!r}] "
+                    f"must be shape (n_obs, >=2); got {coords.shape}."
+                )
+
+            par_series: Optional[pd.Series] = None
+            if parcellation_obs_key is not None:
+                if parcellation_obs_key in adata.obs.columns:
+                    par_series = adata.obs[parcellation_obs_key]
+                else:
+                    logger.warning(
+                        "Sample %r: obs[%r] not found; parcellation ids will be auto-detected (or set to 0).",
+                        sample_id,
+                        parcellation_obs_key,
+                    )
+            if par_series is None and par_by_cell_label is None:
+                for cand in (
+                    "parcellation_index",
+                    "sample_parcellation_index",
+                ):
+                    if cand in adata.obs.columns:
+                        par_series = adata.obs[cand]
+                        break
+            if par_by_cell_label is not None and parcellation_obs_key is None:
+                # Load per-cell parcellation from CCF coordinates by matching obs_names to cell_label.
+                par = np.array(
+                    [
+                        int(par_by_cell_label.get(str(cid), 0))
+                        for cid in adata.obs_names.astype(str)
+                    ],
+                    dtype=int,
+                )
+            elif par_series is None:
+                logger.warning(
+                    "Sample %r: no parcellation column found (and no CCF mapping); using 0 for all cells.",
+                    sample_id,
+                )
+                par = np.zeros(int(adata.n_obs), dtype=int)
+            else:
+                par = self._parse_parcellation_obs_to_int(par_series, missing_value=0)
+
+            z_vec: Optional[np.ndarray] = None
+            if z_obs_key is not None:
+                if z_obs_key not in adata.obs.columns:
+                    raise KeyError(
+                        f"AnnData for sample {sample_id!r} is missing obs[{z_obs_key!r}]."
+                    )
+                z_vec = pd.to_numeric(adata.obs[z_obs_key], errors="coerce").to_numpy()
+
+            sample = Sample(sample_id=sample_id)
+            if preserve_input_adata:
+                sample.adata = adata
+                # Ensure some conventions used elsewhere in the codebase.
+                if "sample_id" not in sample.adata.obs.columns:
+                    sample.adata.obs["sample_id"] = str(sample_id)
+                if "library_id" not in sample.adata.uns:
+                    sample.adata.uns["library_id"] = str(sample_id)
+                # Write parsed integer parcellation ids for downstream code.
+                sample.adata.obs[parcellation_write_obs_key] = par
+
+            rm_scores: Optional[np.ndarray] = None
+            if rm_ideal_output_key in adata.obs.columns:
+                rm_scores = pd.to_numeric(
+                    adata.obs[rm_ideal_output_key], errors="coerce"
+                ).to_numpy(dtype=float)
+
+            for i, cell_id in enumerate(adata.obs_names.astype(str)):
+                par_idx = int(par[i])
+                par_info = self.parcellation_tree.get(par_idx, {})
+                x = float(coords[i, 0])
+                y = float(coords[i, 1])
+                z = (
+                    float(z_vec[i])
+                    if z_vec is not None and np.isfinite(z_vec[i])
+                    else 0.0
+                )
+
+                cell = Cell(
+                    x=x,
+                    y=y,
+                    z=z,
+                    cell_id=str(cell_id),
+                    parcellation_index=par_idx,
+                    parcellation_info=par_info,
+                    sample_id=sample_id,
+                )
+
+                if feature_name == "gene_expression":
+                    cell.X = self._row_to_1d_numpy(adata[i, :].X)
+                    cell.feature = cell.X
+                else:
+                    if feature_name not in adata.obsm:
+                        raise KeyError(
+                            f"AnnData for sample {sample_id!r} is missing obsm[{feature_name!r}]."
+                        )
+                    cell.feature = self._row_to_1d_numpy(adata.obsm[feature_name][i])
+                    cell.X = None
+
+                self.cells.append(cell)
+                sample.cells.append(cell)
+
+                meta_rows.append(
+                    {
+                        "cell_label": str(cell_id),
+                        "brain_section_label": str(sample_id),
+                        "x": x,
+                        "y": y,
+                        "z": z,
+                        "parcellation_index": par_idx,
+                    }
+                )
+
+            if rm_scores is not None and len(rm_scores) == len(sample.cells):
+                sample.rm_ideal_score = np.asarray(rm_scores, dtype=float).reshape(-1)
+
+            self.samples[sample_id] = sample
+
+        if meta_rows:
+            self.merged_cell_metadata = pd.DataFrame(meta_rows)
+
+        if feature_name != "gene_expression":
+            feat_dims: set = set()
+            for c in self.cells:
+                if c.feature is not None:
+                    feat_dims.add(int(np.asarray(c.feature).reshape(-1).shape[0]))
+            if len(feat_dims) > 1:
+                raise ValueError(
+                    "Inconsistent embedding dimensions across cells for "
+                    f"feature_name={feature_name!r}: found sizes {sorted(feat_dims)}. "
+                    "All cells must share the same embedding width."
+                )
+
+        if not preserve_input_adata:
+            # Build AnnData per sample (aligned with Sample.cells).
+            logger.info("Constructing AnnData for each sample...")
+            var: pd.DataFrame
+            if feature_name == "gene_expression":
+                # All items already subset to common genes; any sample's var is fine.
+                var = items[0][1].var.copy(deep=False)
+            else:
+                # Embeddings: use placeholder feature ids (length inferred from the first cell).
+                first_dim = int(np.asarray(self.cells[0].feature).reshape(-1).shape[0])
+                var = pd.DataFrame(
+                    index=pd.Index(
+                        [f"feature_{j}" for j in range(first_dim)], name="feature_id"
+                    )
+                )
+            for sample in self.samples.values():
+                sample.construct_adata(
+                    var=var,
+                    require_features=(feature_name != "gene_expression"),
+                    rm_ideal_output_key=rm_ideal_output_key,
+                )
+
     def get_sample(self, sample_id: str) -> Optional[Sample]:
         return self.samples.get(sample_id, None)
 
