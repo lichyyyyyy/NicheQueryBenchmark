@@ -165,10 +165,10 @@ python src/add_embeddings.py
 python src/add_embeddings.py --sample-ids Zhuang-ABCA-1.098
 
 # Custom paths
-python src/add_embeddings.py \
-  --emb-folder "/path/to/quest_20260601_225717_gene_expr_quest" \
-  --h5ad-folder "/path/to/h5ad/folder" \
-  --obsm-key X_quest_emb
+.venv/bin/python add_embeddings.py \
+  --emb-folder "/Users/sheryli/Documents/life/biology/Ji Lab/ST_FM_benchmark/exploration/QueST/output/embeddings/quest_20260601_225717_gene_expr_quest" \
+  --h5ad-folder "/Users/sheryli/Documents/life/biology/Ji Lab/ST_FM_benchmark/BenchmarkNicheQuery/notebook/ccf/data/benchmark_samples/20260601_225717" \
+  --obsm-key X_gene_expr_quest
 """
 
 

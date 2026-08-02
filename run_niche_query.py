@@ -19,7 +19,7 @@ import numpy as np
 from src.NicheQueryPrototype.database import Database
 from src.NicheQueryPrototype.niche import Niche
 from src.NicheQueryPrototype.query import NicheQuery
-from src.add_embeddings import (
+from add_embeddings import (
     DEFAULT_EMB_FOLDER,
     DEFAULT_H5AD_FOLDER,
     DEFAULT_OBSM_KEY,
@@ -352,6 +352,8 @@ def run_niche_query(
         niche_query.niche_query_visualization(
             query_samples,
             show_target_niches=show_target_niches,
+            rm_target_top_pct=[1, 5, 10],
+            rm_target_top_k=200,
         )
         save_open_figures(output_dir, prefix=run_prefix)
 
@@ -421,12 +423,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not add QueST embeddings before running.",
     )
-    parser.add_argument(
-        "--no-target-niches",
-        action="store_true",
-        help="Skip target-niche panels in visualization.",
-    )
     return parser.parse_args()
+
+
+"""
+PYTHONPATH=. .venv/bin/python run_niche_query.py \
+  --sample-data-dir "notebook/ccf/data/benchmark_samples/20260601_225717" \
+  --embedding-obsm-key X_gene_expr_quest \
+  --query-niche-sample-id Zhuang-ABCA-1.098 \
+  --niche-obsm-keys query_niche_9_15 \
+  --output-dir "notebook/ccf/data/benchmark_samples/20260601_225717/quest_niche_query_output"
+"""
 
 
 def main() -> None:
@@ -442,7 +449,7 @@ def main() -> None:
         ensure_embeddings=not args.skip_embeddings,
         output_dir=args.output_dir,
         export_dir=args.export_dir,
-        show_target_niches=not args.no_target_niches,
+        show_target_niches=False,
     )
 
 

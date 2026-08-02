@@ -275,6 +275,33 @@ def _target_niches_obs_key_for_pct(pct: float) -> str:
     return f"target_niches_top_{label}pct"
 
 
+def _target_niches_obs_key_for_top_k(k: int) -> str:
+    """``adata.obs`` column for top-``k`` RM-Ideal target highlight."""
+    return f"target_niches_top_{int(k)}"
+
+
+def _normalize_rm_target_top_k_list(
+    v: Optional[Union[int, List[int]]],
+) -> List[int]:
+    """Single int or list → deduplicated positive top-K values (e.g. ``[200]``)."""
+    if v is None:
+        return []
+    if isinstance(v, (list, tuple)):
+        raw = list(v)
+    else:
+        raw = [v]
+    out: List[int] = []
+    seen: set[int] = set()
+    for x in raw:
+        xi = int(x)
+        if xi <= 0:
+            raise ValueError(f"rm_target_top_k values must be positive integers, got {x!r}")
+        if xi not in seen:
+            seen.add(xi)
+            out.append(xi)
+    return out
+
+
 def _set_target_niches_top_pct_scores(
     sample: Sample, rm_score: np.ndarray, pct: float, obs_key: str
 ) -> None:
@@ -286,6 +313,24 @@ def _set_target_niches_top_pct_scores(
     top_mask = _top_fraction_mask_by_score(rm, pct)
     scores_out = np.full(rm.size, np.nan, dtype=np.float64)
     scores_out[top_mask] = rm_vis[top_mask]
+    sample.adata.obs[obs_key] = (
+        pd.Series(scores_out, index=[c.id for c in sample.cells])
+        .reindex(sample.adata.obs_names)
+        .to_numpy(dtype=np.float64)
+    )
+
+
+def _set_target_niches_top_k_scores(
+    sample: Sample, rm_score: np.ndarray, top_k: int, obs_key: str
+) -> None:
+    """
+    Top ``top_k`` cells by RM-Ideal get clipped scores in [0, 1]; others NaN (plotted gray).
+    """
+    rm = _as_1d_float64(rm_score)
+    rm_vis = np.clip(rm, 0.0, 1.0)
+    top_idx = _top_k_indices_by_fixed_k(rm, top_k)
+    scores_out = np.full(rm.size, np.nan, dtype=np.float64)
+    scores_out[top_idx] = rm_vis[top_idx]
     sample.adata.obs[obs_key] = (
         pd.Series(scores_out, index=[c.id for c in sample.cells])
         .reindex(sample.adata.obs_names)
@@ -1171,6 +1216,7 @@ class NicheQuery:
         show_target_niches: bool = False,
         spot_size: float = 0.02,
         rm_target_top_pct: Optional[Union[float, List[float]]] = None,
+        rm_target_top_k: Optional[Union[int, List[int]]] = None,
         *,
         viz_max_cols: int = 6,
         viz_panel_size_in: Tuple[float, float] = (2.75, 2.75),
@@ -1185,8 +1231,14 @@ class NicheQuery:
         one combined figure is drawn: each row is a top-% threshold, each column is a
         sample. Cells outside the top K% are gray; top-K cells are colored by RM-Ideal
         score in [0, 1]. Requires ``compute_rm_ideal_score``. A single float is treated
-        as a one-element list. Without ``rm_target_top_pct``, RM-Ideal targets use
-        continuous scores; otherwise parcellation mask defines targets.
+        as a one-element list.
+
+        If ``show_target_niches`` and ``rm_target_top_k`` is set (e.g. ``200``), an
+        additional row per K value highlights the top-K cells by RM-Ideal score (using
+        ``min(K, n_cells)`` cells per sample). Can be combined with ``rm_target_top_pct``.
+
+        Without ``rm_target_top_pct`` or ``rm_target_top_k``, RM-Ideal targets use
+        continuous scores when available; otherwise parcellation mask defines targets.
 
         ``target_viz_panel_size_in`` and ``target_spot_size`` control the larger target-
         niche grid (defaults are bigger than the niche-query panels).
@@ -1196,7 +1248,12 @@ class NicheQuery:
             if show_target_niches
             else []
         )
-        use_rm_top_pct_list = bool(top_pct_list)
+        top_k_list = (
+            _normalize_rm_target_top_k_list(rm_target_top_k)
+            if show_target_niches
+            else []
+        )
+        use_rm_target_grid = bool(top_pct_list or top_k_list)
 
         self.generate_niche_features_and_parcellation_mask(search_samples)
 
@@ -1221,7 +1278,7 @@ class NicheQuery:
                         f"Sample {sample.id!r}: rm_ideal_score length ({len(rm_score)}) "
                         f"does not match number of cells ({len(sample.cells)})."
                     )
-                if use_rm_top_pct_list:
+                if use_rm_target_grid:
                     for pct in top_pct_list:
                         _set_target_niches_top_pct_scores(
                             sample,
@@ -1229,7 +1286,15 @@ class NicheQuery:
                             pct,
                             _target_niches_obs_key_for_pct(pct),
                         )
+                    for top_k in top_k_list:
+                        _set_target_niches_top_k_scores(
+                            sample,
+                            rm_score,
+                            top_k,
+                            _target_niches_obs_key_for_top_k(top_k),
+                        )
                     sample.adata.uns["target_niches_top_pct_list"] = list(top_pct_list)
+                    sample.adata.uns["target_niches_top_k_list"] = list(top_k_list)
                 else:
                     sample.adata.obs["target_niches"] = np.nan
                     for i, cell in enumerate(sample.cells):
@@ -1237,16 +1302,19 @@ class NicheQuery:
                             rm_score[i]
                         )
                     sample.adata.uns.pop("target_niches_top_pct_list", None)
+                    sample.adata.uns.pop("target_niches_top_k_list", None)
                 continue
 
-            if use_rm_top_pct_list:
+            if use_rm_target_grid:
                 logger.warning(
-                    "Sample %r: rm_target_top_pct=%s ignored (no rm_ideal_score); "
-                    "using parcellation mask for target_niches.",
+                    "Sample %r: rm_target_top_pct=%s rm_target_top_k=%s ignored "
+                    "(no rm_ideal_score); using parcellation mask for target_niches.",
                     sample.id,
                     rm_target_top_pct,
+                    rm_target_top_k,
                 )
             sample.adata.uns.pop("target_niches_top_pct_list", None)
+            sample.adata.uns.pop("target_niches_top_k_list", None)
             target_mask = self.get_parcellation_mask(
                 sample, self.niche.unique_parcellation_indices
             )
@@ -1285,16 +1353,33 @@ class NicheQuery:
                 if target_spot_size is not None
                 else max(spot_size, 0.04)
             )
-            if use_rm_top_pct_list:
-                n_pct = len(top_pct_list)
+            if use_rm_target_grid:
+                target_rows: List[tuple[str, str, str, Union[float, int]]] = [
+                    (
+                        f"Top {pct:g}% RM-Ideal",
+                        _target_niches_obs_key_for_pct(pct),
+                        "pct",
+                        pct,
+                    )
+                    for pct in top_pct_list
+                ]
+                target_rows.extend(
+                    (
+                        f"Top {top_k} RM-Ideal",
+                        _target_niches_obs_key_for_top_k(top_k),
+                        "k",
+                        top_k,
+                    )
+                    for top_k in top_k_list
+                )
+                n_rows = len(target_rows)
                 fig, axes_grid = _spatial_viz_figure_grid(
-                    n_pct,
+                    n_rows,
                     n,
                     panel_width_in=tpw,
                     panel_height_in=tph,
                 )
-                for row, pct in enumerate(top_pct_list):
-                    obs_key = _target_niches_obs_key_for_pct(pct)
+                for row, (row_title, obs_key, kind, value) in enumerate(target_rows):
                     for col, sample in enumerate(search_samples):
                         ax = axes_grid[row, col]
                         if obs_key not in sample.adata.obs.columns:
@@ -1303,14 +1388,17 @@ class NicheQuery:
                                     sample.adata.n_obs, np.nan, dtype=np.float64
                                 )
                             else:
-                                _set_target_niches_top_pct_scores(
-                                    sample,
-                                    _as_1d_float64(
-                                        np.asarray(sample.rm_ideal_score, dtype=float)
-                                    ),
-                                    pct,
-                                    obs_key,
+                                rm_score = _as_1d_float64(
+                                    np.asarray(sample.rm_ideal_score, dtype=float)
                                 )
+                                if kind == "pct":
+                                    _set_target_niches_top_pct_scores(
+                                        sample, rm_score, float(value), obs_key
+                                    )
+                                else:
+                                    _set_target_niches_top_k_scores(
+                                        sample, rm_score, int(value), obs_key
+                                    )
                         sc.pl.spatial(
                             sample.adata,
                             color=obs_key,
@@ -1322,11 +1410,11 @@ class NicheQuery:
                             cmap=target_rm_cmap,
                             na_color="#d9d9d9",
                             colorbar_loc="right" if col == n - 1 else None,
-                            title=f"Top {pct:g}% RM-Ideal\n{sample.id}",
+                            title=f"{row_title}\n{sample.id}",
                         )
-                pct_labels = ", ".join(f"{p:g}%" for p in top_pct_list)
+                row_labels = ", ".join(title for title, _, _, _ in target_rows)
                 fig.suptitle(
-                    f"Target niches by RM-Ideal top-% ({pct_labels}; color in [0, 1])",
+                    f"Target niches by RM-Ideal ({row_labels}; color in [0, 1])",
                     fontsize=18,
                 )
                 fig.subplots_adjust(top=0.93, hspace=0.28, wspace=0.12)
