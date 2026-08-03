@@ -1,0 +1,9 @@
+query_niche_id,source_slice,niche_name,center_cell,k_hop,cells,parcellations_in_niche,parcellation_composition,parcellation_names
+"Zhuang-ABCA-1.096_query_niche_207_123","Zhuang-ABCA-1.096","query_niche_207_123","115873764268629722312182509357101936308","10","100","207;123","46;54","Area postrema;Koelliker-Fuse subnucleus"
+"Zhuang-ABCA-1.097_query_niche_207_123","Zhuang-ABCA-1.097","query_niche_207_123","284896277831894781863454227616495127602","10","100","207;123","57;43","Area postrema;Koelliker-Fuse subnucleus"
+"Zhuang-ABCA-1.098_query_niche_207_123","Zhuang-ABCA-1.098","query_niche_207_123","337502760026487302083958961400454036056","10","100","207;123","40;60","Area postrema;Koelliker-Fuse subnucleus"
+"Zhuang-ABCA-1.099_query_niche_207_123","Zhuang-ABCA-1.099","query_niche_207_123","107866618339577374843073403153303495275","10","100","207;123","54;46","Area postrema;Koelliker-Fuse subnucleus"
+"C57BL6J-638850.28_query_niche_9_15","C57BL6J-638850.28","query_niche_9_15","1019171910101350095","10","100","9;15","50;50","Primary somatosensory area, trunk, layer 6a;Parataenial nucleus"
+"C57BL6J-638850.29_query_niche_9_15","C57BL6J-638850.29","query_niche_9_15","1019171907101890717","10","100","9;15","50;50","Primary somatosensory area, trunk, layer 6a;Parataenial nucleus"
+"C57BL6J-638850.30_query_niche_9_15","C57BL6J-638850.30","query_niche_9_15","1018093344102050071-4","10","100","9;15","56;44","Primary somatosensory area, trunk, layer 6a;Parataenial nucleus"
+"C57BL6J-638850.31_query_niche_9_15","C57BL6J-638850.31","query_niche_9_15","1018093345101970356","10","100","9;15","57;43","Primary somatosensory area, trunk, layer 6a;Parataenial nucleus"
