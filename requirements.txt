@@ -7,12 +7,12 @@ scanpy
 numpy
 pandas
 scipy
-scikit-learn
+scikit - learn
 
 # Plotting modules imported by the NicheQuery implementation
 matplotlib
 
 # Graph construction and neural-network utilities
 torch
-torch-geometric
-torch-cluster
+torch - geometric
+torch - cluster

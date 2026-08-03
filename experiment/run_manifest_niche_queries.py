@@ -50,8 +50,9 @@ RESULT_COLUMNS = (
     "query_id",
     "cell_id",
     "niche_query_score",
-    "rank",
+    "niche_query_score_rank",
     "rm_ideal_score",
+    "rm_ideal_rank",
 )
 
 # Database.construct_from_sample_adatas uses ``gene_expression`` for adata.X;
@@ -406,6 +407,7 @@ def atomic_write_query_results(
     niche_query_scores: Iterable[float],
     ranks: Iterable[int],
     rm_ideal_scores: Iterable[float],
+    rm_ideal_ranks: Iterable[int],
     destination: Path,
 ) -> None:
     """Write a query result CSV without exposing a partially written file."""
@@ -427,9 +429,20 @@ def atomic_write_query_results(
                     float(niche_query_score),
                     int(rank),
                     float(rm_ideal_score),
+                    int(rm_ideal_rank),
                 )
-                for cell_id, niche_query_score, rank, rm_ideal_score in zip(
-                    cell_ids, niche_query_scores, ranks, rm_ideal_scores
+                for (
+                    cell_id,
+                    niche_query_score,
+                    rank,
+                    rm_ideal_score,
+                    rm_ideal_rank,
+                ) in zip(
+                    cell_ids,
+                    niche_query_scores,
+                    ranks,
+                    rm_ideal_scores,
+                    rm_ideal_ranks,
                 )
             )
         os.replace(temporary, destination)
@@ -553,6 +566,14 @@ def run_one_query(
             f"{rm_ideal_scores.shape[0]} does not match target n_obs "
             f"{target_adata.n_obs}"
         )
+
+    # Rank RM-Ideal scores independently from the predicted cosine scores.
+    # Rank 1 is the highest RM-Ideal score; target observation order breaks ties.
+    rm_ideal_descending_order = np.argsort(-rm_ideal_scores, kind="stable")
+    rm_ideal_ranks = np.empty(rm_ideal_scores.shape[0], dtype=np.int64)
+    rm_ideal_ranks[rm_ideal_descending_order] = np.arange(
+        1, rm_ideal_scores.shape[0] + 1
+    )
     # For gene expression, Database may create gene-aligned copies. Copy only the
     # newly constructed masks back to the original AnnData before writing it.
     if source_dirty:
@@ -578,6 +599,7 @@ def run_one_query(
         niche_query_scores=niche_query_scores,
         ranks=ranks,
         rm_ideal_scores=rm_ideal_scores,
+        rm_ideal_ranks=rm_ideal_ranks,
         destination=result_path,
     )
 
