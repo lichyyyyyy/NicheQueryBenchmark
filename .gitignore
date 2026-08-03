@@ -2,3 +2,5 @@
 data/
 notebook/*/data
 .vscode/
+experiment/raw_results/
+*.pyc
