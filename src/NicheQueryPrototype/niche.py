@@ -158,9 +158,9 @@ class Niche:
         )
         assert (
             center_cell_id is not None and db.get_cell(center_cell_id) is not None
-        ) or (
-            sample_id is not None and parcellation_index is not None
-        ), "Center cell or parcellation_index should be not null"
+        ) or (sample_id is not None and parcellation_index is not None), (
+            "Center cell or parcellation_index should be not null"
+        )
         if center_cell_id is not None and db.get_cell(center_cell_id) is not None:
             self.center_cell = db.get_cell(center_cell_id)
             self.sample_id = self.center_cell.sample_id

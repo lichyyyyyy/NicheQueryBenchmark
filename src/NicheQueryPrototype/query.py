@@ -295,7 +295,9 @@ def _normalize_rm_target_top_k_list(
     for x in raw:
         xi = int(x)
         if xi <= 0:
-            raise ValueError(f"rm_target_top_k values must be positive integers, got {x!r}")
+            raise ValueError(
+                f"rm_target_top_k values must be positive integers, got {x!r}"
+            )
         if xi not in seen:
             seen.add(xi)
             out.append(xi)
@@ -510,9 +512,9 @@ def _avg_bio_batch(
 
 class NicheQuery:
     def __init__(self, db: Database, niche: Niche, k: int):
-        assert (
-            0 < k <= 10
-        ), "Invalid subgraph parameter, should be between 1 and 10 (included)"
+        assert 0 < k <= 10, (
+            "Invalid subgraph parameter, should be between 1 and 10 (included)"
+        )
         self.db = db
         self.niche = niche
         self.k = k

@@ -1,0 +1,18 @@
+# AnnData and single-cell/spatial data handling
+anndata
+h5py
+scanpy
+
+# Numerical, statistical, and machine-learning routines
+numpy
+pandas
+scipy
+scikit-learn
+
+# Plotting modules imported by the NicheQuery implementation
+matplotlib
+
+# Graph construction and neural-network utilities
+torch
+torch-geometric
+torch-cluster

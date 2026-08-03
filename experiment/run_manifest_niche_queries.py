@@ -225,7 +225,9 @@ def load_query_manifest(
     if selected_query_ids is not None:
         missing = selected_query_ids - {row.query_id for row in result}
         if missing:
-            raise KeyError(f"Requested query_id values are absent from {path}: {sorted(missing)}")
+            raise KeyError(
+                f"Requested query_id values are absent from {path}: {sorted(missing)}"
+            )
     return result
 
 
@@ -250,7 +252,9 @@ def parse_embedding_overrides(values: Iterable[str]) -> dict[str, str]:
 def validate_inputs(
     rows: list[QueryRow], data_dir: Path, embedding_features: dict[str, str]
 ) -> None:
-    missing_types = sorted({row.embedding_type for row in rows} - embedding_features.keys())
+    missing_types = sorted(
+        {row.embedding_type for row in rows} - embedding_features.keys()
+    )
     if missing_types:
         raise KeyError(
             f"No feature mapping for embedding type(s) {missing_types}; use "
@@ -258,10 +262,15 @@ def validate_inputs(
         )
     # Validate every unique slice once; source and target sets can overlap.
     slice_ids = {row.source_slice for row in rows} | {row.target_slice for row in rows}
-    missing_files = [str(data_dir / f"{slice_id}.h5ad") for slice_id in sorted(slice_ids)
-                     if not (data_dir / f"{slice_id}.h5ad").is_file()]
+    missing_files = [
+        str(data_dir / f"{slice_id}.h5ad")
+        for slice_id in sorted(slice_ids)
+        if not (data_dir / f"{slice_id}.h5ad").is_file()
+    ]
     if missing_files:
-        raise FileNotFoundError("Missing slice file(s):\n  " + "\n  ".join(missing_files))
+        raise FileNotFoundError(
+            "Missing slice file(s):\n  " + "\n  ".join(missing_files)
+        )
 
 
 def _binary_mask(values: Any, n_obs: int) -> np.ndarray | None:
@@ -314,7 +323,9 @@ def get_or_construct_niche(db: Any, metadata: NicheRow) -> tuple[Any, bool]:
     if obs_exists:
         mask = _binary_mask(adata.obs[metadata.query_niche_id], adata.n_obs)
         if mask is not None:
-            logger.info("Reusing obs[%r] as the source niche mask", metadata.query_niche_id)
+            logger.info(
+                "Reusing obs[%r] as the source niche mask", metadata.query_niche_id
+            )
             return _niche_from_mask(db, metadata.source_slice, mask), False
         logger.warning(
             "obs[%r] exists but is not a non-empty binary mask; it may be an "
@@ -327,7 +338,9 @@ def get_or_construct_niche(db: Any, metadata: NicheRow) -> tuple[Any, bool]:
     if metadata.niche_name in adata.obsm:
         mask = _binary_mask(adata.obsm[metadata.niche_name], adata.n_obs)
         if mask is not None:
-            logger.info("Reusing obsm[%r] as the source niche mask", metadata.niche_name)
+            logger.info(
+                "Reusing obsm[%r] as the source niche mask", metadata.niche_name
+            )
             if not obs_exists:
                 adata.obs[metadata.query_niche_id] = mask.astype(np.int8)
                 return _niche_from_mask(db, metadata.source_slice, mask), True
@@ -465,7 +478,9 @@ def run_one_query(
     # receive the new rm_ideal_score column.
     if result_path.is_file() and not overwrite_results:
         if result_csv_has_current_schema(result_path):
-            logger.info("[SKIP] query_id=%d: %s already exists", row.query_id, result_path)
+            logger.info(
+                "[SKIP] query_id=%d: %s already exists", row.query_id, result_path
+            )
             return False
         logger.info(
             "[RECOMPUTE] query_id=%d: %s uses an outdated result schema",
@@ -476,7 +491,9 @@ def run_one_query(
     # Only the source and target needed by this manifest row are loaded. This
     # avoids holding all twelve large slices in memory at once.
     source_adata = ad.read_h5ad(source_path)
-    target_adata = source_adata if source_path == target_path else ad.read_h5ad(target_path)
+    target_adata = (
+        source_adata if source_path == target_path else ad.read_h5ad(target_path)
+    )
 
     # When source == target, pass one AnnData object under one sample ID.
     sample_adatas = {row.source_slice: source_adata}
@@ -638,7 +655,9 @@ def main() -> None:
     data_dir = args.data_dir.resolve()
     raw_results_dir = args.raw_results_dir.resolve()
     validate_inputs(rows, data_dir, embedding_features)
-    logger.info("Validated %d query row(s) and %d niche definition(s)", len(rows), len(niches))
+    logger.info(
+        "Validated %d query row(s) and %d niche definition(s)", len(rows), len(niches)
+    )
 
     if args.dry_run:
         logger.info("Dry run complete; no AnnData files were loaded or changed")

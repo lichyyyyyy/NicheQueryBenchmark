@@ -791,7 +791,9 @@ class Database:
             if parts:
                 md = pd.concat(parts, axis=0, ignore_index=True)
                 md.drop_duplicates(subset=["cell_label"], inplace=True)
-                par_ser = pd.to_numeric(md["parcellation_index"], errors="coerce").fillna(0)
+                par_ser = pd.to_numeric(
+                    md["parcellation_index"], errors="coerce"
+                ).fillna(0)
                 par_by_cell_label = dict(
                     zip(
                         md["cell_label"].astype(str).to_numpy(),
