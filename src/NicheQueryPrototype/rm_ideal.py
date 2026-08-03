@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 import numpy as np
+from ot.lp import emd2
 from scipy.spatial import Delaunay, cKDTree
-from scipy.optimize import linprog
 
 if TYPE_CHECKING:
     from .database import Cell, Sample
@@ -337,42 +337,9 @@ class RmIdeal:
         Exact Wasserstein / EMD between two uniform empirical distributions.
         """
         na, nb = cost.shape
-        a = np.full(na, 1.0 / na, dtype=float)
-        b = np.full(nb, 1.0 / nb, dtype=float)
-
-        c = cost.ravel()
-        A_eq = []
-        b_eq = []
-
-        # Row constraints
-        for i in range(na):
-            row = np.zeros(na * nb, dtype=float)
-            row[i * nb : (i + 1) * nb] = 1.0
-            A_eq.append(row)
-            b_eq.append(a[i])
-
-        # Column constraints
-        for j in range(nb):
-            col = np.zeros(na * nb, dtype=float)
-            col[j::nb] = 1.0
-            A_eq.append(col)
-            b_eq.append(b[j])
-
-        A_eq = np.vstack(A_eq)
-        b_eq = np.array(b_eq, dtype=float)
-        bounds = [(0.0, None)] * (na * nb)
-
-        res = linprog(
-            c=c,
-            A_eq=A_eq,
-            b_eq=b_eq,
-            bounds=bounds,
-            method="highs",
-        )
-        if not res.success:
-            raise RuntimeError(f"Optimal transport failed: {res.message}")
-
-        return float(res.fun)
+        source_weights = np.full(na, 1.0 / na, dtype=float)
+        target_weights = np.full(nb, 1.0 / nb, dtype=float)
+        return float(emd2(source_weights, target_weights, cost))
 
     def _rm_score_from_features(
         self, query_feats: np.ndarray, cand_feats: np.ndarray

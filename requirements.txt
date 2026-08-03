@@ -8,6 +8,8 @@ numpy
 pandas
 scipy
 scikit - learn
+faiss-cpu
+POT
 
 # Plotting modules imported by the NicheQuery implementation
 matplotlib

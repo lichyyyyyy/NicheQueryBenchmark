@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -31,6 +32,32 @@ from src.NicheQueryPrototype.database import (
 import scanpy as sc
 from src.NicheQueryPrototype.niche import Niche, logger
 from src.NicheQueryPrototype.rm_ideal import RmIdeal
+
+
+def _faiss_hnsw_knn_graph(x: np.ndarray, k: int) -> torch.Tensor:
+    """Build a bounded-memory approximate KNN graph for large CPU inputs."""
+    import faiss
+
+    x = np.ascontiguousarray(x, dtype=np.float32)
+    faiss.omp_set_num_threads(max(1, min(10, os.cpu_count() or 1)))
+    index = faiss.IndexHNSWFlat(x.shape[1], 48)
+    index.hnsw.efConstruction = 150
+    index.hnsw.efSearch = 200
+    index.add(x)
+    _, candidates = index.search(x, min(k + 1, x.shape[0]))
+
+    # HNSW can occasionally omit the query point. Enforce the self-loop promised
+    # by loop=True and fill the remaining positions in increasing distance order.
+    neighbor_indices = np.empty((x.shape[0], k), dtype=np.int64)
+    for target, row in enumerate(candidates):
+        neighbors = [target]
+        neighbors.extend(int(value) for value in row if value != target)
+        neighbor_indices[target] = neighbors[:k]
+
+    targets = torch.arange(x.shape[0], dtype=torch.long).repeat_interleave(k)
+    sources = torch.from_numpy(neighbor_indices.reshape(-1))
+    # torch_cluster's source_to_target flow returns [neighbor, query].
+    return torch.stack([sources, targets], dim=0)
 
 
 def _as_1d_float64(a: np.ndarray) -> np.ndarray:
@@ -555,7 +582,7 @@ class NicheQuery:
     """
 
     def generate_niche_features_and_parcellation_mask(
-        self, samples: List[Sample], overwrite=False
+        self, samples: List[Sample], overwrite=False, knn_backend: str = "exact"
     ):
         def _row_normalized_adjacency(edge_index: torch.Tensor, num_nodes: int, device):
             """
@@ -618,7 +645,24 @@ class NicheQuery:
             )
 
             # (3) KNN graph in feature space
-            edge_index = knn_graph(X, k=self.k, loop=True)  # shape [2, E]
+            selected_backend = knn_backend
+            if selected_backend == "auto":
+                selected_backend = (
+                    "hnsw" if device.type == "cpu" and X_np.shape[1] >= 128 else "exact"
+                )
+            if selected_backend == "hnsw":
+                if device.type != "cpu":
+                    raise ValueError("The HNSW KNN backend only supports CPU tensors")
+                logger.info(
+                    "[KNN] Using FAISS HNSW for %d cells x %d features",
+                    X_np.shape[0],
+                    X_np.shape[1],
+                )
+                edge_index = _faiss_hnsw_knn_graph(X_np, self.k)
+            elif selected_backend == "exact":
+                edge_index = knn_graph(X, k=self.k, loop=True)
+            else:
+                raise ValueError("knn_backend must be one of {'auto', 'exact', 'hnsw'}")
 
             # (4) A_norm @ X  (row-normalized adjacency)
             N = X.size(0)

@@ -36,6 +36,7 @@ import logging
 import os
 import sys
 import tempfile
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -46,6 +47,7 @@ DEFAULT_DATA_DIR = REPO_ROOT / "data" / "20260601_225717"
 DEFAULT_QUERY_MANIFEST = Path(__file__).with_name("query_manifest.csv")
 DEFAULT_NICHE_MANIFEST = Path(__file__).with_name("query_niche_manifest.csv")
 DEFAULT_RAW_RESULTS_DIR = Path(__file__).with_name("raw_results")
+RM_IDEAL_MEMORY_CACHE_SIZE = 8
 RESULT_COLUMNS = (
     "query_id",
     "cell_id",
@@ -103,6 +105,15 @@ class NicheRow:
     k_hop: int
     cell_limit: int
     parcellations: tuple[int, ...]
+
+
+RmIdealKey = tuple[str, str, int]
+RmIdealCache = OrderedDict[RmIdealKey, Any]
+
+
+def rm_ideal_key(row: QueryRow) -> RmIdealKey:
+    """Identify inputs that fully determine an RM-Ideal score vector."""
+    return (row.query_niche_id, row.target_slice, row.niche_query_k)
 
 
 def _read_csv(path: Path, required_columns: set[str]) -> list[dict[str, str]]:
@@ -467,6 +478,41 @@ def result_csv_has_current_schema(path: Path) -> bool:
     return header == list(RESULT_COLUMNS)
 
 
+def find_rm_ideal_sources(
+    rows: Iterable[QueryRow], raw_results_dir: Path
+) -> dict[RmIdealKey, Path]:
+    """Index completed results that can supply embedding-independent scores."""
+    sources: dict[RmIdealKey, Path] = {}
+    for row in rows:
+        result_path = raw_results_dir / f"query_{row.query_id}.csv"
+        if result_csv_has_current_schema(result_path):
+            sources.setdefault(rm_ideal_key(row), result_path)
+    return sources
+
+
+def read_rm_ideal_scores(path: Path) -> Any:
+    """Read only the RM-Ideal column from a current-schema result CSV."""
+    import numpy as np
+
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != list(RESULT_COLUMNS):
+            raise ValueError(
+                f"Cannot reuse RM-Ideal scores from {path}: schema changed"
+            )
+        return np.fromiter(
+            (float(result["rm_ideal_score"]) for result in reader), dtype=float
+        )
+
+
+def remember_rm_ideal_scores(cache: RmIdealCache, key: RmIdealKey, scores: Any) -> None:
+    """Store an RM-Ideal vector in a small LRU cache to bound memory usage."""
+    cache[key] = scores
+    cache.move_to_end(key)
+    while len(cache) > RM_IDEAL_MEMORY_CACHE_SIZE:
+        cache.popitem(last=False)
+
+
 def run_one_query(
     row: QueryRow,
     metadata: NicheRow,
@@ -474,6 +520,9 @@ def run_one_query(
     raw_results_dir: Path,
     feature_name: str,
     overwrite_results: bool,
+    knn_backend: str,
+    rm_ideal_sources: dict[RmIdealKey, Path],
+    rm_ideal_cache: RmIdealCache,
 ) -> bool:
     """Run one row; return False when an existing result caused a skip."""
     import anndata as ad
@@ -533,7 +582,9 @@ def run_one_query(
     # Generate target-cell neighborhood features, then compare each one with the
     # mean query-niche feature using cosine similarity.
     niche_query = NicheQuery(db=db, niche=niche, k=row.niche_query_k)
-    niche_query.generate_niche_features_and_parcellation_mask([db_target])
+    niche_query.generate_niche_features_and_parcellation_mask(
+        [db_target], knn_backend=knn_backend
+    )
     niche_query_scores = np.asarray(
         niche_query.niche_query_within_a_sample(db_target), dtype=float
     ).reshape(-1)
@@ -550,16 +601,32 @@ def run_one_query(
     ranks = np.empty(niche_query_scores.shape[0], dtype=np.int64)
     ranks[descending_order] = np.arange(1, niche_query_scores.shape[0] + 1)
 
-    # Compute RM-Ideal directly on the target sample. Passing no output key keeps
-    # scores on the in-memory Sample object instead of modifying target_adata.obs.
-    # The sigmoid transform matches the repository's existing RM-Ideal workflow.
-    niche_query.compute_rm_ideal_score(
-        samples=[db_target],
-        rm_ideal_output_key=None,
-        rm_ideal_post_transform="sigmoid",
-        overwrite=True,
-    )
-    rm_ideal_scores = np.asarray(db_target.rm_ideal_score, dtype=float).reshape(-1)
+    # RM-Ideal depends on niche geometry, target spatial labels, and k, but not on
+    # the embedding. Reuse it across the three embedding variants and across
+    # resumed runs instead of solving the same transport problems repeatedly.
+    score_key = rm_ideal_key(row)
+    rm_ideal_scores = rm_ideal_cache.get(score_key)
+    if rm_ideal_scores is not None:
+        rm_ideal_cache.move_to_end(score_key)
+        logger.info("[CACHE] Reusing in-memory RM-Ideal scores")
+    elif score_key in rm_ideal_sources:
+        source_result = rm_ideal_sources[score_key]
+        rm_ideal_scores = read_rm_ideal_scores(source_result)
+        remember_rm_ideal_scores(rm_ideal_cache, score_key, rm_ideal_scores)
+        logger.info("[CACHE] Reusing RM-Ideal scores from %s", source_result)
+    else:
+        # Passing no output key keeps scores off target_adata.obs. The sigmoid
+        # transform matches the repository's existing RM-Ideal workflow.
+        niche_query.compute_rm_ideal_score(
+            samples=[db_target],
+            rm_ideal_output_key=None,
+            rm_ideal_post_transform="sigmoid",
+            overwrite=True,
+        )
+        rm_ideal_scores = np.asarray(db_target.rm_ideal_score, dtype=float).reshape(-1)
+        remember_rm_ideal_scores(rm_ideal_cache, score_key, rm_ideal_scores)
+
+    rm_ideal_scores = np.asarray(rm_ideal_scores, dtype=float).reshape(-1)
     if rm_ideal_scores.shape[0] != target_adata.n_obs:
         raise ValueError(
             f"query_id={row.query_id}: RM-Ideal score count "
@@ -602,6 +669,7 @@ def run_one_query(
         rm_ideal_ranks=rm_ideal_ranks,
         destination=result_path,
     )
+    rm_ideal_sources.setdefault(score_key, result_path)
 
     logger.info(
         "[DONE] query_id=%d embedding=%s niche=%s target=%s niche_query_k=%d result=%s",
@@ -652,6 +720,15 @@ def parse_args() -> argparse.Namespace:
         help="Recompute query CSV files that already exist.",
     )
     parser.add_argument(
+        "--knn-backend",
+        choices=("auto", "exact", "hnsw"),
+        default="auto",
+        help=(
+            "Neighbor-search backend. auto uses bounded-memory FAISS HNSW for "
+            "high-dimensional CPU embeddings and exact search otherwise."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate manifests, mappings, and slice paths without running queries.",
@@ -672,7 +749,8 @@ def main() -> None:
     # Treat both an omitted parameter (None) and an explicitly empty parameter
     # ([]) as "run all rows in query_manifest.csv".
     selected_ids = set(args.query_ids) if args.query_ids else None
-    rows = load_query_manifest(args.query_manifest.resolve(), niches, selected_ids)
+    query_manifest = args.query_manifest.resolve()
+    rows = load_query_manifest(query_manifest, niches, selected_ids)
     embedding_features = parse_embedding_overrides(args.embedding_feature)
     data_dir = args.data_dir.resolve()
     raw_results_dir = args.raw_results_dir.resolve()
@@ -687,9 +765,21 @@ def main() -> None:
 
     completed = 0
     skipped = 0
+    # An explicitly overwritten run ignores results from older runs, but still
+    # shares newly computed RM-Ideal vectors among rows completed in this run.
+    rm_ideal_sources = (
+        {}
+        if args.overwrite_results
+        else find_rm_ideal_sources(
+            load_query_manifest(query_manifest, niches, None), raw_results_dir
+        )
+    )
+    rm_ideal_cache: RmIdealCache = OrderedDict()
+    logger.info("Found %d reusable RM-Ideal result group(s)", len(rm_ideal_sources))
     # Process in manifest order so log positions and query_id values are easy to
     # cross-reference with query_manifest.csv.
     for position, row in enumerate(rows, start=1):
+        print(f"Query manifest row: {row}", flush=True)
         logger.info(
             "[START] row %d/%d query_id=%d embedding=%s source=%s target=%s niche_query_k=%d",
             position,
@@ -707,6 +797,9 @@ def main() -> None:
             raw_results_dir=raw_results_dir,
             feature_name=embedding_features[row.embedding_type],
             overwrite_results=args.overwrite_results,
+            knn_backend=args.knn_backend,
+            rm_ideal_sources=rm_ideal_sources,
+            rm_ideal_cache=rm_ideal_cache,
         ):
             completed += 1
         else:
