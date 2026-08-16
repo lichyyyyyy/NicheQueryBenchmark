@@ -4,3 +4,6 @@ notebook/*/data
 .vscode/
 experiment/raw_results/
 *.pyc
+experiment/__pycache__/
+__pycache__/
+.ruff_cache/
