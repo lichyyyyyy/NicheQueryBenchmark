@@ -31,10 +31,14 @@ EXPERIMENT_DIR = Path(__file__).resolve().parent
 DEFAULT_METRICS = (
     EXPERIMENT_DIR / "evaluation_results" / "evaluation_metrics_per_query.csv"
 )
+DEFAULT_AGGREGATED_METRICS = (
+    EXPERIMENT_DIR / "evaluation_results" / "evaluation_metrics_by_embedding_type.csv"
+)
 DEFAULT_MANIFEST = EXPERIMENT_DIR / "manifests" / "query_manifest.csv"
 DEFAULT_OUTPUT_DIR = EXPERIMENT_DIR / "evaluation_results" / "drawings"
 DEFAULT_OUTPUT_NAME = "all_metrics_violin_by_embedding.png"
 DEFAULT_HEATMAP_OUTPUT_NAME = "all_metrics_by_niche_and_embedding_heatmaps.png"
+DEFAULT_DOT_PLOT_OUTPUT_NAME = "aggregated_metrics_cleveland_dot_plot.png"
 DEFAULT_CONFIDENCE_LEVEL = 95.0
 BOOTSTRAP_RESAMPLES = 10_000
 
@@ -62,6 +66,24 @@ EMBEDDING_LABELS = {
     "gene_expr": "Gene expression",
 }
 COLORS = ("#4C78A8", "#F58518", "#54A24B")
+MARKERS = ("o", "s", "D")
+
+DOT_PLOT_METRIC_LABELS = {
+    "pearson": "Pearson",
+    "spearman": "Spearman",
+    "ndcg_at_0_5_pct": "NDCG @ 0.5%",
+    "ndcg_at_1pct": "NDCG @ 1%",
+    "ndcg_at_5pct": "NDCG @ 5%",
+    "ndcg_at_top_200": "NDCG @ top 200",
+    "enrichment_at_0_5pct": "Enrichment @ 0.5%",
+    "enrichment_at_1pct": "Enrichment @ 1%",
+    "enrichment_at_5pct": "Enrichment @ 5%",
+    "enrichment_at_top_200": "Enrichment @ top 200",
+    "recall_at_0_5pct": "Recall @ 0.5%",
+    "recall_at_1pct": "Recall @ 1%",
+    "recall_at_5pct": "Recall @ 5%",
+    "recall_at_top_200": "Recall @ top 200",
+}
 
 
 def load_embedding_by_query(path: Path) -> tuple[dict[str, str], list[str]]:
@@ -143,6 +165,51 @@ def load_metrics_by_embedding(
         metric: dict(values_by_embedding)
         for metric, values_by_embedding in values.items()
     }
+
+
+def load_aggregated_metrics(
+    path: Path,
+) -> tuple[dict[str, dict[str, float]], list[str]]:
+    """Load one aggregated value per metric and embedding type."""
+    if not path.is_file():
+        raise FileNotFoundError(f"Aggregated evaluation metrics not found: {path}")
+
+    values: dict[str, dict[str, float]] = {metric: {} for metric in METRIC_LABELS}
+    embedding_order: list[str] = []
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        required = {"embedding_type", *METRIC_LABELS}
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"{path} is missing columns: {sorted(missing)}")
+
+        for line_number, row in enumerate(reader, start=2):
+            embedding = (row.get("embedding_type") or "").strip()
+            if not embedding:
+                raise ValueError(f"{path}:{line_number}: embedding_type is required")
+            if embedding in embedding_order:
+                raise ValueError(
+                    f"{path}:{line_number}: duplicate embedding_type {embedding!r}"
+                )
+            embedding_order.append(embedding)
+
+            for metric in METRIC_LABELS:
+                try:
+                    value = float(row[metric])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"{path}:{line_number}: {metric} must be numeric"
+                    ) from exc
+                if not math.isfinite(value):
+                    raise ValueError(f"{path}:{line_number}: {metric} must be finite")
+                values[metric][embedding] = value
+
+    if len(embedding_order) != 3:
+        raise ValueError(
+            "Expected exactly 3 embedding types in the aggregated metrics; "
+            f"found {len(embedding_order)}: {embedding_order}"
+        )
+    return values, embedding_order
 
 
 def load_niche_embedding_metrics(
@@ -425,6 +492,111 @@ def draw_all_metrics_violin(
     plt.close(fig)
 
 
+def draw_aggregated_metrics_dot_plot(
+    metrics: dict[str, dict[str, float]],
+    embedding_order: list[str],
+    output_path: Path,
+) -> None:
+    """Draw a grouped Cleveland dot plot of all aggregated metrics."""
+    missing_metrics = set(METRIC_LABELS) - set(metrics)
+    if missing_metrics:
+        raise ValueError(f"Missing aggregated metrics: {sorted(missing_metrics)}")
+    if len(embedding_order) != 3 or len(set(embedding_order)) != 3:
+        raise ValueError("Dot plot requires exactly 3 unique embedding types")
+
+    for metric in METRIC_LABELS:
+        missing_embeddings = set(embedding_order) - set(metrics[metric])
+        if missing_embeddings:
+            raise ValueError(
+                f"{metric} is missing embeddings: {sorted(missing_embeddings)}"
+            )
+
+    metric_names = list(METRIC_LABELS)
+    y_positions = np.arange(len(metric_names))
+    all_values = np.asarray(
+        [
+            metrics[metric][embedding]
+            for metric in metric_names
+            for embedding in embedding_order
+        ],
+        dtype=np.float64,
+    )
+    if not np.all(np.isfinite(all_values)):
+        raise ValueError("All aggregated metric values must be finite")
+
+    fig, ax = plt.subplots(figsize=(11, 9.5))
+
+    # The connector makes both the spread and the ordering of embeddings easy
+    # to scan, while the points retain each embedding's exact position.
+    for y_position, metric in zip(y_positions, metric_names):
+        row_values = [metrics[metric][name] for name in embedding_order]
+        ax.hlines(
+            y_position,
+            min(row_values),
+            max(row_values),
+            color="#B8BDC5",
+            linewidth=2.0,
+            zorder=1,
+        )
+
+    for embedding, color, marker in zip(embedding_order, COLORS, MARKERS):
+        values = [metrics[metric][embedding] for metric in metric_names]
+        legend_label = EMBEDDING_LABELS.get(
+            embedding, embedding.replace("_", " ")
+        ).replace("\n", " ")
+        ax.scatter(
+            values,
+            y_positions,
+            s=72,
+            color=color,
+            marker=marker,
+            edgecolors="white",
+            linewidths=0.9,
+            label=legend_label,
+            zorder=3,
+        )
+
+    ax.set_yticks(
+        y_positions,
+        [DOT_PLOT_METRIC_LABELS[metric] for metric in metric_names],
+    )
+    ax.invert_yaxis()
+    ax.set_xlabel("Aggregated metric value", fontsize=12)
+    fig.suptitle(
+        "Aggregated Metrics by Embedding",
+        fontsize=17,
+        weight="bold",
+        y=0.98,
+    )
+    ax.grid(axis="x", color="#D9DDE2", linewidth=0.8)
+    ax.set_axisbelow(True)
+    if float(np.min(all_values)) < 0.0:
+        ax.axvline(0.0, color="#777777", linewidth=0.9, linestyle="--", zorder=0)
+    else:
+        ax.set_xlim(left=0.0)
+    ax.margins(x=0.06, y=0.025)
+    ax.spines[["top", "right", "left"]].set_visible(False)
+    ax.tick_params(axis="y", length=0, labelsize=10)
+    ax.tick_params(axis="x", labelsize=9)
+    handles, labels = ax.get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.945),
+        ncols=3,
+        frameon=False,
+        fontsize=10,
+        handletextpad=0.5,
+        columnspacing=1.8,
+    )
+
+    fig.subplots_adjust(left=0.24, right=0.98, bottom=0.08, top=0.86)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=240, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
 def draw_all_metrics_heatmaps(
     mean_metrics: dict[str, np.ndarray],
     niche_order: list[str],
@@ -609,10 +781,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--metrics", type=Path, default=DEFAULT_METRICS)
     parser.add_argument("--query-manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument(
+        "--aggregated-metrics",
+        type=Path,
+        default=DEFAULT_AGGREGATED_METRICS,
+        help="Aggregated metrics CSV for the Cleveland dot plot (default: %(default)s)",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT_DIR / DEFAULT_OUTPUT_NAME,
         help="Output image path (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--dot-output",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR / DEFAULT_DOT_PLOT_OUTPUT_NAME,
+        help="Cleveland dot plot output path (default: %(default)s)",
     )
     return parser.parse_args()
 
@@ -652,6 +836,20 @@ def main() -> None:
     print(
         f"Wrote {heatmap_output_path} "
         f"({len(METRIC_LABELS)} metrics, 8 niches x 3 embeddings)"
+    )
+
+    aggregated_metrics, aggregated_embedding_order = load_aggregated_metrics(
+        args.aggregated_metrics.resolve()
+    )
+    dot_output_path = args.dot_output.resolve()
+    draw_aggregated_metrics_dot_plot(
+        aggregated_metrics,
+        aggregated_embedding_order,
+        dot_output_path,
+    )
+    print(
+        f"Wrote {dot_output_path} "
+        f"({len(METRIC_LABELS)} metrics x {len(aggregated_embedding_order)} embeddings)"
     )
 
 
