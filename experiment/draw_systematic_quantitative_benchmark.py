@@ -3,7 +3,8 @@
 The per-query evaluation table does not contain embedding labels, so this
 script joins it to ``manifests/query_manifest.csv`` by ``query_id`` and draws
 a multi-panel figure containing every metric. Each violin overlays one point
-per query.
+per query. All evaluation rows are included, including queries whose source
+slice is the same as their target slice.
 
 Example
 -------
@@ -26,7 +27,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-
 EXPERIMENT_DIR = Path(__file__).resolve().parent
 DEFAULT_METRICS = (
     EXPERIMENT_DIR / "evaluation_results" / "evaluation_metrics_per_query.csv"
@@ -34,6 +34,7 @@ DEFAULT_METRICS = (
 DEFAULT_MANIFEST = EXPERIMENT_DIR / "manifests" / "query_manifest.csv"
 DEFAULT_OUTPUT_DIR = EXPERIMENT_DIR / "evaluation_results" / "drawings"
 DEFAULT_OUTPUT_NAME = "all_metrics_violin_by_embedding.png"
+DEFAULT_HEATMAP_OUTPUT_NAME = "all_metrics_by_niche_and_embedding_heatmaps.png"
 DEFAULT_CONFIDENCE_LEVEL = 95.0
 BOOTSTRAP_RESAMPLES = 10_000
 
@@ -98,7 +99,7 @@ def load_embedding_by_query(path: Path) -> tuple[dict[str, str], list[str]]:
 def load_metrics_by_embedding(
     path: Path, embedding_by_query: dict[str, str]
 ) -> dict[str, dict[str, list[float]]]:
-    """Load all per-query metrics and group them by metric and embedding."""
+    """Group all queries by metric and embedding without filtering slice pairs."""
     if not path.is_file():
         raise FileNotFoundError(f"Evaluation metrics not found: {path}")
 
@@ -114,6 +115,8 @@ def load_metrics_by_embedding(
             raise ValueError(f"{path} is missing columns: {sorted(missing)}")
 
         for line_number, row in enumerate(reader, start=2):
+            # Intentionally retain every evaluation query, including manifest
+            # entries whose source_slice equals target_slice.
             query_id = (row.get("query_id") or "").strip()
             if query_id in seen_query_ids:
                 raise ValueError(f"{path}:{line_number}: duplicate query_id {query_id}")
@@ -131,9 +134,7 @@ def load_metrics_by_embedding(
                         f"{path}:{line_number}: {metric} must be numeric"
                     ) from exc
                 if not math.isfinite(metric_value):
-                    raise ValueError(
-                        f"{path}:{line_number}: {metric} must be finite"
-                    )
+                    raise ValueError(f"{path}:{line_number}: {metric} must be finite")
                 values[metric][embedding].append(metric_value)
 
     if not values:
@@ -142,6 +143,112 @@ def load_metrics_by_embedding(
         metric: dict(values_by_embedding)
         for metric, values_by_embedding in values.items()
     }
+
+
+def load_niche_embedding_metrics(
+    metrics_path: Path,
+    manifest_path: Path,
+) -> tuple[dict[str, np.ndarray], list[str], list[str], list[int]]:
+    """Return mean metrics and task counts for each niche and embedding.
+
+    Rows and columns follow their first-appearance order in the query manifest.
+    Task counts are totals per niche across all embedding types. Same-source/
+    target-slice queries are intentionally included.
+    """
+    query_metadata: dict[str, tuple[str, str]] = {}
+    niche_order: list[str] = []
+    embedding_order: list[str] = []
+    with manifest_path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        required = {"query_id", "query_niche_id", "embedding_type"}
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"{manifest_path} is missing columns: {sorted(missing)}")
+        for line_number, row in enumerate(reader, start=2):
+            # No source/target-slice exclusion: every evaluation row contributes
+            # to its niche-by-embedding mean and niche task count.
+            query_id = (row.get("query_id") or "").strip()
+            niche = (row.get("query_niche_id") or "").strip()
+            embedding = (row.get("embedding_type") or "").strip()
+            if not query_id or not niche or not embedding:
+                raise ValueError(
+                    f"{manifest_path}:{line_number}: query_id, query_niche_id, "
+                    "and embedding_type are required"
+                )
+            if query_id in query_metadata:
+                raise ValueError(
+                    f"{manifest_path}:{line_number}: duplicate query_id {query_id}"
+                )
+            query_metadata[query_id] = (niche, embedding)
+            if niche not in niche_order:
+                niche_order.append(niche)
+            if embedding not in embedding_order:
+                embedding_order.append(embedding)
+
+    if len(niche_order) != 8 or len(embedding_order) != 3:
+        raise ValueError(
+            "Expected an 8 niche x 3 embedding benchmark; found "
+            f"{len(niche_order)} niches x {len(embedding_order)} embeddings"
+        )
+
+    grouped_values: dict[str, dict[tuple[str, str], list[float]]] = {
+        metric: defaultdict(list) for metric in METRIC_LABELS
+    }
+    task_counts: dict[str, int] = defaultdict(int)
+    seen_query_ids: set[str] = set()
+    with metrics_path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        required = {"query_id", *METRIC_LABELS}
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"{metrics_path} is missing columns: {sorted(missing)}")
+        for line_number, row in enumerate(reader, start=2):
+            query_id = (row.get("query_id") or "").strip()
+            if query_id in seen_query_ids:
+                raise ValueError(
+                    f"{metrics_path}:{line_number}: duplicate query_id {query_id}"
+                )
+            seen_query_ids.add(query_id)
+            if query_id not in query_metadata:
+                raise ValueError(
+                    f"{metrics_path}:{line_number}: query_id {query_id!r} is absent "
+                    "from the manifest"
+                )
+            niche, embedding = query_metadata[query_id]
+            for metric in METRIC_LABELS:
+                try:
+                    metric_value = float(row[metric])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"{metrics_path}:{line_number}: {metric} must be numeric"
+                    ) from exc
+                if not math.isfinite(metric_value):
+                    raise ValueError(
+                        f"{metrics_path}:{line_number}: {metric} must be finite"
+                    )
+                grouped_values[metric][(niche, embedding)].append(metric_value)
+            task_counts[niche] += 1
+
+    matrices: dict[str, np.ndarray] = {}
+    for metric in METRIC_LABELS:
+        matrix = np.empty((len(niche_order), len(embedding_order)), dtype=np.float64)
+        for row_index, niche in enumerate(niche_order):
+            for column_index, embedding in enumerate(embedding_order):
+                values = grouped_values[metric][(niche, embedding)]
+                if not values:
+                    raise ValueError(
+                        f"No {metric} results for niche={niche!r}, "
+                        f"embedding={embedding!r}"
+                    )
+                matrix[row_index, column_index] = np.mean(values)
+        matrices[metric] = matrix
+
+    return (
+        matrices,
+        niche_order,
+        embedding_order,
+        [task_counts[niche] for niche in niche_order],
+    )
 
 
 def _validate_embeddings(
@@ -280,9 +387,7 @@ def draw_all_metrics_violin(
 
     for index, (metric, title) in enumerate(METRIC_LABELS.items()):
         values_by_embedding = metrics[metric]
-        present_embeddings = _validate_embeddings(
-            values_by_embedding, embedding_order
-        )
+        present_embeddings = _validate_embeddings(values_by_embedding, embedding_order)
         _draw_violin_panel(
             axes[panel_locations[metric]],
             values_by_embedding,
@@ -320,6 +425,185 @@ def draw_all_metrics_violin(
     plt.close(fig)
 
 
+def draw_all_metrics_heatmaps(
+    mean_metrics: dict[str, np.ndarray],
+    niche_order: list[str],
+    embedding_order: list[str],
+    task_counts: list[int],
+    output_path: Path,
+) -> None:
+    """Draw all metric means as annotated niche-by-embedding heatmaps."""
+    expected_shape = (len(niche_order), len(embedding_order))
+    if len(niche_order) != 8 or len(embedding_order) != 3:
+        raise ValueError("Heatmaps require exactly 8 niches and 3 embeddings")
+    if len(task_counts) != len(niche_order):
+        raise ValueError("task_counts must contain one value per niche")
+    missing_metrics = set(METRIC_LABELS) - set(mean_metrics)
+    if missing_metrics:
+        raise ValueError(f"Missing heatmap metrics: {sorted(missing_metrics)}")
+    for metric, matrix in mean_metrics.items():
+        if metric in METRIC_LABELS and matrix.shape != expected_shape:
+            raise ValueError(
+                f"{metric} has shape {matrix.shape}; expected {expected_shape}"
+            )
+
+    panel_locations = {
+        "pearson": (0, 1),
+        "spearman": (0, 2),
+        "ndcg_at_0_5_pct": (1, 0),
+        "ndcg_at_1pct": (1, 1),
+        "ndcg_at_5pct": (1, 2),
+        "ndcg_at_top_200": (1, 3),
+        "enrichment_at_0_5pct": (2, 0),
+        "enrichment_at_1pct": (2, 1),
+        "enrichment_at_5pct": (2, 2),
+        "enrichment_at_top_200": (2, 3),
+        "recall_at_0_5pct": (3, 0),
+        "recall_at_1pct": (3, 1),
+        "recall_at_5pct": (3, 2),
+        "recall_at_top_200": (3, 3),
+    }
+    families = {
+        "Correlation": ("pearson", "spearman"),
+        "NDCG": (
+            "ndcg_at_0_5_pct",
+            "ndcg_at_1pct",
+            "ndcg_at_5pct",
+            "ndcg_at_top_200",
+        ),
+        "Normalized enrichment": (
+            "enrichment_at_0_5pct",
+            "enrichment_at_1pct",
+            "enrichment_at_5pct",
+            "enrichment_at_top_200",
+        ),
+        "Recall": (
+            "recall_at_0_5pct",
+            "recall_at_1pct",
+            "recall_at_5pct",
+            "recall_at_top_200",
+        ),
+    }
+
+    family_styles: dict[str, tuple[str, float, float]] = {}
+    for family, family_metrics in families.items():
+        family_values = np.concatenate(
+            [mean_metrics[metric].ravel() for metric in family_metrics]
+        )
+        if family in {"Correlation", "Normalized enrichment"}:
+            limit = max(float(np.max(np.abs(family_values))), 1e-12)
+            family_styles[family] = ("RdBu_r", -limit, limit)
+        else:
+            maximum = max(float(np.max(family_values)), 1e-12)
+            family_styles[family] = ("YlGnBu", 0.0, maximum)
+
+    fig, axes = plt.subplots(4, 4, figsize=(28, 24))
+
+    embedding_labels = [
+        EMBEDDING_LABELS.get(name, name.replace("_", " ")) for name in embedding_order
+    ]
+    row_label_axes = {0: (0, 1), 1: (1, 0), 2: (2, 0), 3: (3, 0)}
+    family_images: dict[str, plt.AxesImage] = {}
+
+    for family, family_metrics in families.items():
+        cmap, vmin, vmax = family_styles[family]
+        for metric in family_metrics:
+            row, column = panel_locations[metric]
+            ax = axes[row, column]
+            matrix = mean_metrics[metric]
+            image = ax.imshow(
+                matrix,
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+                aspect="auto",
+            )
+            family_images[family] = image
+            ax.set_title(METRIC_LABELS[metric], fontsize=12, weight="bold", pad=8)
+            ax.set_xticks(np.arange(len(embedding_order)), embedding_labels)
+            if (row, column) == row_label_axes[row]:
+                labels = [
+                    f"{niche}  [n={count}]"
+                    for niche, count in zip(niche_order, task_counts)
+                ]
+                ax.set_yticks(np.arange(len(niche_order)), labels)
+                ax.tick_params(axis="y", labelsize=7.5)
+            else:
+                ax.set_yticks(np.arange(len(niche_order)), [""] * len(niche_order))
+
+            for row_index in range(matrix.shape[0]):
+                for column_index in range(matrix.shape[1]):
+                    value = matrix[row_index, column_index]
+                    normalized = image.norm(value)
+                    if cmap == "RdBu_r":
+                        text_color = (
+                            "white" if abs(normalized - 0.5) > 0.30 else "#222222"
+                        )
+                    else:
+                        text_color = "white" if normalized > 0.58 else "#222222"
+                    ax.text(
+                        column_index,
+                        row_index,
+                        f"{value:.3f}",
+                        ha="center",
+                        va="center",
+                        color=text_color,
+                        fontsize=7.5,
+                        weight="bold",
+                    )
+
+            ax.set_xticks(np.arange(-0.5, len(embedding_order), 1), minor=True)
+            ax.set_yticks(np.arange(-0.5, len(niche_order), 1), minor=True)
+            ax.grid(which="minor", color="white", linewidth=1.4)
+            ax.tick_params(which="minor", bottom=False, left=False)
+            ax.tick_params(axis="x", labelsize=7.5)
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+
+    used_locations = set(panel_locations.values())
+    for row in range(4):
+        for column in range(4):
+            if (row, column) not in used_locations:
+                axes[row, column].set_visible(False)
+
+    fig.suptitle(
+        "Mean Task-level Metrics by Query Niche and Embedding",
+        fontsize=24,
+        weight="bold",
+        y=0.975,
+    )
+    fig.supxlabel("Embedding", fontsize=16, y=0.018)
+    fig.supylabel(
+        "query_niche_id [total query tasks]",
+        fontsize=16,
+        x=0.012,
+    )
+    fig.subplots_adjust(
+        left=0.25,
+        right=0.94,
+        bottom=0.06,
+        top=0.92,
+        hspace=0.34,
+        wspace=0.22,
+    )
+
+    # One shared scale per metric family keeps the panels comparable without
+    # crowding the figure with fourteen separate colorbars.
+    for family, family_metrics in families.items():
+        family_axes = [axes[panel_locations[metric]] for metric in family_metrics]
+        boxes = [ax.get_position() for ax in family_axes]
+        bottom = min(box.y0 for box in boxes)
+        top = max(box.y1 for box in boxes)
+        colorbar_ax = fig.add_axes([0.955, bottom, 0.009, top - bottom])
+        colorbar = fig.colorbar(family_images[family], cax=colorbar_ax)
+        colorbar.set_label(f"Mean {family.lower()}", fontsize=10, labelpad=10)
+        colorbar.ax.tick_params(labelsize=8)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--metrics", type=Path, default=DEFAULT_METRICS)
@@ -349,6 +633,25 @@ def main() -> None:
     print(
         f"Wrote {output_path} ({len(METRIC_LABELS)} metric panels, "
         f"{DEFAULT_CONFIDENCE_LEVEL:g}% confidence intervals)"
+    )
+
+    mean_heatmap_metrics, niche_order, heatmap_embeddings, task_counts = (
+        load_niche_embedding_metrics(
+            args.metrics.resolve(),
+            args.query_manifest.resolve(),
+        )
+    )
+    heatmap_output_path = (DEFAULT_OUTPUT_DIR / DEFAULT_HEATMAP_OUTPUT_NAME).resolve()
+    draw_all_metrics_heatmaps(
+        mean_heatmap_metrics,
+        niche_order,
+        heatmap_embeddings,
+        task_counts,
+        heatmap_output_path,
+    )
+    print(
+        f"Wrote {heatmap_output_path} "
+        f"({len(METRIC_LABELS)} metrics, 8 niches x 3 embeddings)"
     )
 
 
