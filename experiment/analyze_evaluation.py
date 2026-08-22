@@ -41,15 +41,13 @@ import numpy as np
 from scipy.stats import pearsonr, spearmanr
 
 EXPERIMENT_DIR = Path(__file__).resolve().parent
-DEFAULT_QUERY_MANIFEST = EXPERIMENT_DIR / "query_manifest.csv"
+DEFAULT_QUERY_MANIFEST = EXPERIMENT_DIR / "manifests" / "query_manifest.csv"
 DEFAULT_RAW_RESULTS_DIR = EXPERIMENT_DIR / "raw_results"
 DEFAULT_OUTPUT = (
     EXPERIMENT_DIR / "evaluation_results" / "evaluation_metrics_per_query.csv"
 )
 DEFAULT_AGGREGATE_OUTPUT = (
-    EXPERIMENT_DIR
-    / "evaluation_results"
-    / "evaluation_metrics_by_embedding_type.csv"
+    EXPERIMENT_DIR / "evaluation_results" / "evaluation_metrics_by_embedding_type.csv"
 )
 OUTPUT_COLUMNS = (
     "query_id",
@@ -373,7 +371,9 @@ def aggregate_metrics_by_embedding_type(
     for row in rows:
         query_id = int(row["query_id"])
         if query_id not in manifest_query_ids:
-            raise KeyError(f"query_id={query_id} does not exist in {query_manifest_path}")
+            raise KeyError(
+                f"query_id={query_id} does not exist in {query_manifest_path}"
+            )
         if query_id in seen_query_ids:
             raise ValueError(f"Duplicate evaluation row for query_id={query_id}")
         seen_query_ids.add(query_id)

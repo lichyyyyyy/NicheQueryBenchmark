@@ -64,9 +64,12 @@ EMBEDDING_LABELS = {
     "gene_expr_quest": "Gene expression\n+ QUEST",
     "scgpt": "scGPT",
     "gene_expr": "Gene expression",
+    "quest_scgpt": "QUEST\n+ scGPT",
 }
-COLORS = ("#4C78A8", "#F58518", "#54A24B")
-MARKERS = ("o", "s", "D")
+COLORS = ("#4C78A8", "#F58518", "#54A24B", "#B279A2")
+MARKERS = ("o", "s", "D", "^")
+EXPECTED_NICHE_COUNT = 8
+EXPECTED_EMBEDDING_COUNT = len(EMBEDDING_LABELS)
 
 DOT_PLOT_METRIC_LABELS = {
     "pearson": "Pearson",
@@ -204,9 +207,10 @@ def load_aggregated_metrics(
                     raise ValueError(f"{path}:{line_number}: {metric} must be finite")
                 values[metric][embedding] = value
 
-    if len(embedding_order) != 3:
+    if len(embedding_order) != EXPECTED_EMBEDDING_COUNT:
         raise ValueError(
-            "Expected exactly 3 embedding types in the aggregated metrics; "
+            f"Expected exactly {EXPECTED_EMBEDDING_COUNT} embedding types in the "
+            "aggregated metrics; "
             f"found {len(embedding_order)}: {embedding_order}"
         )
     return values, embedding_order
@@ -252,9 +256,13 @@ def load_niche_embedding_metrics(
             if embedding not in embedding_order:
                 embedding_order.append(embedding)
 
-    if len(niche_order) != 8 or len(embedding_order) != 3:
+    if (
+        len(niche_order) != EXPECTED_NICHE_COUNT
+        or len(embedding_order) != EXPECTED_EMBEDDING_COUNT
+    ):
         raise ValueError(
-            "Expected an 8 niche x 3 embedding benchmark; found "
+            f"Expected an {EXPECTED_NICHE_COUNT} niche x "
+            f"{EXPECTED_EMBEDDING_COUNT} embedding benchmark; found "
             f"{len(niche_order)} niches x {len(embedding_order)} embeddings"
         )
 
@@ -321,13 +329,14 @@ def load_niche_embedding_metrics(
 def _validate_embeddings(
     values_by_embedding: dict[str, list[float]], embedding_order: list[str]
 ) -> list[str]:
-    """Return the three embeddings represented in the metric data."""
+    """Return all expected embeddings represented in the metric data."""
     present_embeddings = [
         embedding for embedding in embedding_order if embedding in values_by_embedding
     ]
-    if len(present_embeddings) != 3:
+    if len(present_embeddings) != EXPECTED_EMBEDDING_COUNT:
         raise ValueError(
-            "Expected exactly 3 embedding types in the evaluation results; "
+            f"Expected exactly {EXPECTED_EMBEDDING_COUNT} embedding types in the "
+            "evaluation results; "
             f"found {len(present_embeddings)}: {present_embeddings}"
         )
     return present_embeddings
@@ -501,8 +510,14 @@ def draw_aggregated_metrics_dot_plot(
     missing_metrics = set(METRIC_LABELS) - set(metrics)
     if missing_metrics:
         raise ValueError(f"Missing aggregated metrics: {sorted(missing_metrics)}")
-    if len(embedding_order) != 3 or len(set(embedding_order)) != 3:
-        raise ValueError("Dot plot requires exactly 3 unique embedding types")
+    if (
+        len(embedding_order) != EXPECTED_EMBEDDING_COUNT
+        or len(set(embedding_order)) != EXPECTED_EMBEDDING_COUNT
+    ):
+        raise ValueError(
+            f"Dot plot requires exactly {EXPECTED_EMBEDDING_COUNT} unique "
+            "embedding types"
+        )
 
     for metric in METRIC_LABELS:
         missing_embeddings = set(embedding_order) - set(metrics[metric])
@@ -584,7 +599,7 @@ def draw_aggregated_metrics_dot_plot(
         labels,
         loc="upper center",
         bbox_to_anchor=(0.5, 0.945),
-        ncols=3,
+        ncols=len(embedding_order),
         frameon=False,
         fontsize=10,
         handletextpad=0.5,
@@ -606,8 +621,14 @@ def draw_all_metrics_heatmaps(
 ) -> None:
     """Draw all metric means as annotated niche-by-embedding heatmaps."""
     expected_shape = (len(niche_order), len(embedding_order))
-    if len(niche_order) != 8 or len(embedding_order) != 3:
-        raise ValueError("Heatmaps require exactly 8 niches and 3 embeddings")
+    if (
+        len(niche_order) != EXPECTED_NICHE_COUNT
+        or len(embedding_order) != EXPECTED_EMBEDDING_COUNT
+    ):
+        raise ValueError(
+            f"Heatmaps require exactly {EXPECTED_NICHE_COUNT} niches and "
+            f"{EXPECTED_EMBEDDING_COUNT} embeddings"
+        )
     if len(task_counts) != len(niche_order):
         raise ValueError("task_counts must contain one value per niche")
     missing_metrics = set(METRIC_LABELS) - set(mean_metrics)
@@ -835,7 +856,8 @@ def main() -> None:
     )
     print(
         f"Wrote {heatmap_output_path} "
-        f"({len(METRIC_LABELS)} metrics, 8 niches x 3 embeddings)"
+        f"({len(METRIC_LABELS)} metrics, {len(niche_order)} niches x "
+        f"{len(heatmap_embeddings)} embeddings)"
     )
 
     aggregated_metrics, aggregated_embedding_order = load_aggregated_metrics(

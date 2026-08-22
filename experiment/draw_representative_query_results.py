@@ -81,6 +81,7 @@ EMBEDDING_LABELS = {
     "gene_expr_quest": "Gene expression + QUEST",
     "scgpt": "scGPT",
     "gene_expr": "Gene expression",
+    "quest_scgpt": "QUEST + scGPT",
 }
 
 
