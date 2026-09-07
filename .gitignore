@@ -7,3 +7,4 @@ experiment/raw_results/
 experiment/__pycache__/
 __pycache__/
 .ruff_cache/
+Notes.md
