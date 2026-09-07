@@ -4,16 +4,25 @@ Run one slice from the repository root::
 
     .venv/bin/python experiment/generate_query_niche_v2.py \
         --h5ad-file data/20260601_225717/C57BL6J-638850.28.h5ad \
-        --output-dir experiment/niche_metrics --k-hop 2
+        --output-dir experiment/query_niche_metrics --k-hop 10 --niche-size 50
 
-This writes ``experiment/niche_metrics/C57BL6J-638850.28.csv`` with one row per
+This writes ``experiment/query_niche_metrics/C57BL6J-638850.28.csv`` with one row per
 center cell. Omit ``--h5ad-file`` to process all H5AD files in the default data
 directory, or supply ``--data-dir`` to select another directory. Input H5AD
 files are read-only; existing output CSVs are replaced.
 
+For each candidate, try k=2 through the maximum ``k_hop`` and keep the first
+neighborhood containing at least ``niche_size`` cells. Keep the full neighborhood
+even if it exceeds the target. If the target is never reached, keep the
+neighborhood at the maximum k and mark ``target_size_reached`` as false.
+
 CSV columns:
     center_cell_name: Center cell ID from ``adata.obs_names`` (the cell_id index).
     niche_cell_count: Number of cells in the neighborhood (N).
+    target_niche_size: Requested minimum neighborhood size.
+    selected_k_hop: First k reaching the target, or maximum k if unreached.
+    max_k_hop: Maximum k allowed for the search.
+    target_size_reached: Whether the neighborhood reached the target size.
     represented_parcellation_count: Number of represented parcellations (K).
     dominant_parcellation_fraction: Largest parcellation fraction (D).
     parcellation_entropy: Shannon entropy using natural logarithms (H).
@@ -29,7 +38,8 @@ Compute metrics directly for selected positional cell indices::
         coordinates=adata.obsm["spatial"],
         labels=adata.obs["parcellation_index"].to_numpy(),
         candidate_centers=[0, 10, 20],
-        k_hop=2,
+        k_hop=10,
+        niche_size=50,
     )
 
 Each result contains the neighborhood indices, represented parcellation IDs,
@@ -58,6 +68,7 @@ def compute_candidate_niche_metrics(
     *,
     coordinates: Any,
     labels: Any,
+    niche_size: int,
     candidate_centers: Sequence[int] | None = None,
     seed_regions: Sequence[Sequence[int]] | None = None,
     k_hop: int = 2,
@@ -75,17 +86,25 @@ def compute_candidate_niche_metrics(
     overlapping neighborhoods are evaluated independently, with each cell
     counted once within a neighborhood.
 
-    Expansion follows outgoing nearest-neighbor links for ``k_hop`` rounds.
-    The graph connects each cell to ``k_hop`` nearest cells, as in the existing
-    generator. All cells reached within these hops are included. Small datasets
-    use all available neighbors. Zero hops evaluates the seed cells alone.
+    Try k=2 through ``k_hop`` inclusive, stopping independently for each seed
+    when its neighborhood contains at least ``niche_size`` cells. At each k,
+    follow outgoing links to k nearest cells for k rounds, matching the existing
+    generator's convention. All reached cells are included without truncation.
+    Small datasets use all available neighbors. If the target is unreachable,
+    return the maximum-k neighborhood with ``target_size_reached=False``.
 
     Entropy uses natural logarithms. For K=1, H_norm is defined as 0; otherwise
     H_norm = H / log(K). Empty seed regions are rejected. Results preserve
     candidate order and sort neighborhood indices and represented label IDs.
     """
-    if isinstance(k_hop, bool) or not isinstance(k_hop, Integral) or k_hop < 0:
-        raise ValueError("k_hop must be a non-negative integer")
+    if isinstance(k_hop, bool) or not isinstance(k_hop, Integral) or k_hop < 2:
+        raise ValueError("k_hop must be an integer at least 2 (the maximum k)")
+    if (
+        isinstance(niche_size, bool)
+        or not isinstance(niche_size, Integral)
+        or niche_size < 1
+    ):
+        raise ValueError("niche_size must be a positive integer")
     points = np.asarray(coordinates, dtype=float)
     parcellations = np.asarray(labels)
     if points.ndim != 2 or points.shape[1] < 2:
@@ -143,17 +162,20 @@ def compute_candidate_niche_metrics(
 
     results = []
     for seed in seeds:
-        visited = set(seed)
-        frontier = set(seed)
-        for _ in range(k_hop):
-            frontier = {
-                int(neighbor)
-                for index in frontier
-                for neighbor in neighbors[index]
-                if int(neighbor) not in visited
-            }
-            visited.update(frontier)
-            if not frontier:
+        for selected_k in range(2, k_hop + 1):
+            visited = set(seed)
+            frontier = set(seed)
+            for _ in range(selected_k):
+                frontier = {
+                    int(neighbor)
+                    for index in frontier
+                    for neighbor in neighbors[index, :selected_k]
+                    if int(neighbor) not in visited
+                }
+                visited.update(frontier)
+                if not frontier:
+                    break
+            if len(visited) >= niche_size:
                 break
         niche_indices = sorted(visited)
         ids, counts = np.unique(parcellations[niche_indices], return_counts=True)
@@ -169,6 +191,10 @@ def compute_candidate_niche_metrics(
                 "counts": tuple(int(value) for value in counts),
                 "p": tuple(float(value) for value in fractions),
                 "N": size,
+                "target_niche_size": int(niche_size),
+                "selected_k_hop": selected_k,
+                "max_k_hop": int(k_hop),
+                "target_size_reached": size >= niche_size,
                 "K": richness,
                 "D": float(fractions.max()),
                 "H": entropy,
@@ -182,6 +208,7 @@ def export_slice_niche_metrics(
     data_dir: str | Path = DEFAULT_DATA_DIR,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     *,
+    niche_size: int,
     h5ad_file: str | Path | None = None,
     k_hop: int = 2,
     spatial_key: str = "spatial",
@@ -190,6 +217,8 @@ def export_slice_niche_metrics(
     """Write one CSV per H5AD slice, evaluating every cell as a niche center.
 
     Supply ``h5ad_file`` to process only that file instead of ``data_dir``.
+    ``k_hop`` is the maximum k; ``niche_size`` is the minimum target cell count.
+    CSV rows include the target, selected k, maximum k, and target-reached flag.
 
     Files are named ``<slice_name>.csv`` using the H5AD filename stem. The first
     column, ``center_cell_name``, is the unique center cell's ``adata.obs_names``
@@ -207,7 +236,7 @@ def export_slice_niche_metrics(
 
     Example::
 
-        paths = export_slice_niche_metrics(k_hop=2)
+        paths = export_slice_niche_metrics(k_hop=10, niche_size=50)
     """
     import os
     import tempfile
@@ -232,6 +261,10 @@ def export_slice_niche_metrics(
     output_dir.mkdir(parents=True, exist_ok=True)
     scalar_columns = {
         "niche_cell_count": "N",
+        "target_niche_size": "target_niche_size",
+        "selected_k_hop": "selected_k_hop",
+        "max_k_hop": "max_k_hop",
+        "target_size_reached": "target_size_reached",
         "represented_parcellation_count": "K",
         "dominant_parcellation_fraction": "D",
         "parcellation_entropy": "H",
@@ -258,6 +291,7 @@ def export_slice_niche_metrics(
                 coordinates=adata.obsm[spatial_key],
                 labels=adata.obs[parcellation_key].to_numpy(),
                 k_hop=k_hop,
+                niche_size=niche_size,
             )
         finally:
             adata.file.close()
@@ -308,12 +342,14 @@ if __name__ == "__main__":
     source.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     source.add_argument("--h5ad-file", type=Path, help="Process only this H5AD file.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--k-hop", type=int, default=2)
+    parser.add_argument("--k-hop", type=int, default=10, help="Maximum k to try (at least 2).")
+    parser.add_argument("--niche-size", type=int, required=True, help="Target minimum number of cells.")
     args = parser.parse_args()
     for path in export_slice_niche_metrics(
         args.data_dir,
         args.output_dir,
         h5ad_file=args.h5ad_file,
         k_hop=args.k_hop,
+        niche_size=args.niche_size,
     ):
         print(path)
