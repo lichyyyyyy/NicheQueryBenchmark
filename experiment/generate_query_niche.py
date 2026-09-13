@@ -47,6 +47,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+if __package__:
+    from .query_niche_dimensions import QUERY_NICHE_DIMENSIONS, parse_niche_size
+else:
+    from query_niche_dimensions import QUERY_NICHE_DIMENSIONS, parse_niche_size
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "20260601_225717"
 DEFAULT_MANIFEST = Path(__file__).with_name("manifests") / "query_niche_manifest.csv"
@@ -479,7 +484,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--delta", type=float, required=True)
     parser.add_argument("--k-hop", type=int, default=10)
-    parser.add_argument("--cell-limit", type=int, default=100)
+    parser.add_argument(
+        "--cell-limit", type=parse_niche_size,
+        default=QUERY_NICHE_DIMENSIONS["median"],
+        help="Niche dimension name or cell count (default: median from the dimensions manifest)",
+    )
     parser.add_argument(
         "--min-parcellation-cells",
         type=int,

@@ -4,31 +4,29 @@ Run one slice from the repository root::
 
     .venv/bin/python experiment/generate_query_niche_v2.py \
         --h5ad-file data/20260601_225717/C57BL6J-638850.28.h5ad \
-        --output-dir experiment/query_niche_metrics --k-hop 10 --niche-size 50
+        --output-dir experiment/query_niche_metrics/large --k-hop 10 --niche-size large
 
 This writes ``experiment/query_niche_metrics/C57BL6J-638850.28.csv`` with one row per
-center cell. Omit ``--h5ad-file`` to process all H5AD files in the default data
+center cell whose niche reaches the target size. Omit ``--h5ad-file`` to process all H5AD files in the default data
 directory, or supply ``--data-dir`` to select another directory. Input H5AD
 files are read-only; existing output CSVs are replaced.
+``--niche-size`` selects a name from ``manifests/query_niche_dimensions.json``
+(currently ``large`` = 300, ``median`` = 100, ``small`` = 20 cells).
 
 For each candidate, try k=2 through the maximum ``k_hop`` and keep the first
 neighborhood containing at least ``niche_size`` cells. Keep the full neighborhood
-even if it exceeds the target. If the target is never reached, keep the
-neighborhood at the maximum k and mark ``target_size_reached`` as false.
+even if it exceeds the target. If the target is never reached, omit the niche
+from the output CSV.
 
 CSV columns:
     center_cell_name: Center cell ID from ``adata.obs_names`` (the cell_id index).
+    center_spatial_x: Center cell's first spatial coordinate, in original units.
+    center_spatial_y: Center cell's second spatial coordinate, in original units.
     niche_cell_count: Number of cells in the neighborhood (N).
-    target_niche_size: Requested minimum neighborhood size.
-    selected_k_hop: First k reaching the target, or maximum k if unreached.
-    max_k_hop: Maximum k allowed for the search.
-    target_size_reached: Whether the neighborhood reached the target size.
+    selected_k_hop: First k reaching the target.
     represented_parcellation_count: Number of represented parcellations (K).
-    dominant_parcellation_fraction: Largest parcellation fraction (D).
     parcellation_entropy: Shannon entropy using natural logarithms (H).
     normalized_parcellation_entropy: H / log(K), defined as 0 for K=1.
-    parcellation_ids: JSON array of represented parcellation IDs.
-    parcellation_cell_counts: JSON array of counts aligned with parcellation_ids.
     parcellation_fractions: JSON array of fractions aligned with parcellation_ids.
     niche_cell_names: JSON array of cell IDs belonging to the neighborhood.
 
@@ -42,10 +40,17 @@ Compute metrics directly for selected positional cell indices::
         niche_size=50,
     )
 
-Each result contains the neighborhood indices, represented parcellation IDs,
+Each result contains the neighborhood indices, shared ordered parcellation IDs,
 counts, composition vector ``p``, size ``N``, richness ``K``, dominant fraction
 ``D``, entropy ``H``, and normalized entropy ``H_norm``. Parcellation IDs, counts,
-and fractions have matching positions. No composition filtering is applied.
+and fractions have matching positions, including zeros for absent types.
+``parcellation_fractions`` is the composition vector: entry i is the fraction
+of cells with ID ``parcellation_ids[i]``. Export uses the sorted union of IDs
+across the input directory (including sibling slices for ``--h5ad-file``).
+The shared IDs are saved once as a JSON array in
+``<output-dir>/parcellation_ids.json``, rather than repeated in each CSV row.
+Use ``--parcellation-order`` to fix the axis across different datasets or runs
+whose input files change. No composition filtering is applied.
 """
 
 from __future__ import annotations
@@ -57,11 +62,43 @@ from numbers import Integral
 from pathlib import Path
 from typing import Any
 
+if __package__:
+    from .query_niche_dimensions import QUERY_NICHE_DIMENSIONS
+else:
+    from query_niche_dimensions import QUERY_NICHE_DIMENSIONS
+
 import numpy as np
 from scipy.spatial import cKDTree
 
 DEFAULT_DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "20260601_225717"
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "query_niche_metrics"
+
+
+def _integer_parcellations(values: Any) -> np.ndarray:
+    labels = np.asarray(values)
+    if labels.ndim != 1 or not all(
+        isinstance(label, Integral) and not isinstance(label, (bool, np.bool_))
+        for label in labels
+    ):
+        raise ValueError(
+            "labels must contain one-dimensional integer parcellation IDs without missing values"
+        )
+    return labels
+
+
+def _composition_order(labels: Any, order: Sequence[int] | None) -> tuple[int, ...]:
+    present = set(int(value) for value in _integer_parcellations(labels))
+    if order is None:
+        return tuple(sorted(present))
+    axis = tuple(int(value) for value in _integer_parcellations(order))
+    if len(axis) != len(set(axis)):
+        raise ValueError("parcellation_order must not contain duplicate IDs")
+    missing = present - set(axis)
+    if missing:
+        raise ValueError(
+            f"parcellation_order is missing observed IDs: {sorted(missing)}"
+        )
+    return axis
 
 
 def compute_candidate_niche_metrics(
@@ -72,6 +109,7 @@ def compute_candidate_niche_metrics(
     candidate_centers: Sequence[int] | None = None,
     seed_regions: Sequence[Sequence[int]] | None = None,
     k_hop: int = 2,
+    parcellation_order: Sequence[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Expand each center or seed region and compute its niche statistics.
 
@@ -79,6 +117,10 @@ def compute_candidate_niche_metrics(
     one-dimensional array of integer parcellation IDs. Only the first two
     coordinate columns are used, matching ``generate_query_niche.py``. Every
     label is counted, including 0 if present; missing labels are rejected.
+    ``parcellation_order`` defines the shared vector axis and must include all
+    observed labels. By default it is the sorted union of input labels. Pass
+    the same order to separate calls to compare their vectors directly.
+    Absent types have zero counts and fractions; K counts only present types.
 
     Supply either positional ``candidate_centers`` or ``seed_regions`` (one
     sequence of positional cell indices per region). If neither is supplied,
@@ -95,7 +137,7 @@ def compute_candidate_niche_metrics(
 
     Entropy uses natural logarithms. For K=1, H_norm is defined as 0; otherwise
     H_norm = H / log(K). Empty seed regions are rejected. Results preserve
-    candidate order and sort neighborhood indices and represented label IDs.
+    candidate order and sort neighborhood indices.
     """
     if isinstance(k_hop, bool) or not isinstance(k_hop, Integral) or k_hop < 2:
         raise ValueError("k_hop must be an integer at least 2 (the maximum k)")
@@ -122,6 +164,8 @@ def compute_candidate_niche_metrics(
         )
     if candidate_centers is not None and seed_regions is not None:
         raise ValueError("Supply candidate_centers or seed_regions, not both")
+    composition_ids = _composition_order(parcellations, parcellation_order)
+    composition_index = {label: index for index, label in enumerate(composition_ids)}
 
     n_cells = len(points)
     regions = (
@@ -183,13 +227,17 @@ def compute_candidate_niche_metrics(
         richness = len(ids)
         fractions = counts / size
         entropy = float(-np.sum(fractions * np.log(fractions))) if richness > 1 else 0.0
+        aligned_counts = np.zeros(len(composition_ids), dtype=np.int64)
+        for label, count in zip(ids, counts):
+            aligned_counts[composition_index[int(label)]] = count
+        aligned_fractions = aligned_counts / size
         results.append(
             {
                 "seed_indices": seed,
                 "niche_indices": tuple(niche_indices),
-                "parcellations": tuple(int(value) for value in ids),
-                "counts": tuple(int(value) for value in counts),
-                "p": tuple(float(value) for value in fractions),
+                "parcellations": composition_ids,
+                "counts": tuple(int(value) for value in aligned_counts),
+                "p": tuple(float(value) for value in aligned_fractions),
                 "N": size,
                 "target_niche_size": int(niche_size),
                 "selected_k_hop": selected_k,
@@ -206,44 +254,65 @@ def compute_candidate_niche_metrics(
 
 def export_slice_niche_metrics(
     data_dir: str | Path = DEFAULT_DATA_DIR,
-    output_dir: str | Path = DEFAULT_OUTPUT_DIR,
+    output_dir: str | Path | None = None,
     *,
-    niche_size: int,
+    niche_size: str,
     h5ad_file: str | Path | None = None,
     k_hop: int = 2,
     spatial_key: str = "spatial",
     parcellation_key: str = "parcellation_index",
+    parcellation_order: Sequence[int] | None = None,
 ) -> list[Path]:
     """Write one CSV per H5AD slice, evaluating every cell as a niche center.
 
     Supply ``h5ad_file`` to process only that file instead of ``data_dir``.
-    ``k_hop`` is the maximum k; ``niche_size`` is the minimum target cell count.
-    CSV rows include the target, selected k, maximum k, and target-reached flag.
+    ``k_hop`` is the maximum k; ``niche_size`` is a dimension name from
+    ``manifests/query_niche_dimensions.json``, resolved to a minimum cell count.
+    CSV rows include the selected k.
+    Niches with ``target_size_reached=False`` are omitted from the CSV.
+    By default, outputs go under ``query_niche_metrics/<dimension>`` using the
+    dimensions manifest.
 
     Files are named ``<slice_name>.csv`` using the H5AD filename stem. The first
     column, ``center_cell_name``, is the unique center cell's ``adata.obs_names``
-    value. Scalar columns describe niche cell count, represented parcellation
-    count, dominant parcellation fraction, entropy, and normalized entropy.
-    ``parcellation_ids``, ``parcellation_cell_counts``, and
-    ``parcellation_fractions`` are aligned JSON arrays. ``niche_cell_names`` is
-    a JSON array of neighborhood members. All cells and parcellations are
-    included, with no filtering.
+    value. ``center_spatial_x`` and ``center_spatial_y`` contain its coordinates
+    from ``adata.obsm[spatial_key]`` in original units. Scalar columns describe niche cell
+    count, represented parcellation count,
+    entropy, and normalized entropy.
+    ``parcellation_fractions`` is a JSON array aligned with the shared
+    ``parcellation_ids.json`` in the output directory.
+    ``niche_cell_names`` is
+    a JSON array of neighborhood members. All cells and parcellations within
+    retained niches are included, with no composition filtering.
+    All rows share one composition axis, with zeros for absent types. By
+    default, scan labels across all slices in ``data_dir``, or all H5AD siblings
+    of ``h5ad_file`` for single-file exports. ``parcellation_order`` overrides
+    this scan with an explicit order that must include every exported label.
+    An existing ``parcellation_ids.json`` must match the requested order to
+    prevent changing the interpretation of previously exported vectors.
 
     Read one slice at a time in backed mode to avoid loading expression data.
     Existing output CSVs are replaced atomically only after that slice has
     been computed and written successfully. H5AD inputs are opened read-only.
-    Return output paths in sorted input filename order.
+    Return CSV paths in sorted input filename order.
 
     Example::
 
-        paths = export_slice_niche_metrics(k_hop=10, niche_size=50)
+        paths = export_slice_niche_metrics(k_hop=10, niche_size="large")
     """
     import os
     import tempfile
 
     import anndata as ad
 
+    if not isinstance(niche_size, str) or niche_size not in QUERY_NICHE_DIMENSIONS:
+        raise ValueError(
+            f"niche_size must be one of: {', '.join(QUERY_NICHE_DIMENSIONS)}"
+        )
+    target_cell_count = QUERY_NICHE_DIMENSIONS[niche_size]
     data_dir = Path(data_dir)
+    if output_dir is None:
+        output_dir = DEFAULT_OUTPUT_DIR / niche_size
     output_dir = Path(output_dir)
     if h5ad_file is not None:
         source_path = Path(h5ad_file)
@@ -258,24 +327,62 @@ def export_slice_niche_metrics(
         slice_paths = sorted(data_dir.glob("*.h5ad"))
         if not slice_paths:
             raise FileNotFoundError(f"No H5AD files found in {data_dir}")
+    if parcellation_order is None:
+        axis_paths = (
+            sorted(set(slice_paths) | set(slice_paths[0].parent.glob("*.h5ad")))
+            if h5ad_file is not None
+            else slice_paths
+        )
+        all_ids = set()
+        for axis_path in axis_paths:
+            axis_data = ad.read_h5ad(axis_path, backed="r")
+            try:
+                if parcellation_key not in axis_data.obs:
+                    raise KeyError(f"{axis_path}: missing obs[{parcellation_key!r}]")
+                all_ids.update(_integer_parcellations(axis_data.obs[parcellation_key]))
+            finally:
+                axis_data.file.close()
+        parcellation_order = tuple(sorted(int(value) for value in all_ids))
+    else:
+        parcellation_order = _composition_order([], parcellation_order)
     output_dir.mkdir(parents=True, exist_ok=True)
+    ids_path = output_dir / "parcellation_ids.json"
+    if ids_path.exists():
+        with ids_path.open(encoding="utf-8") as handle:
+            existing_order = _composition_order([], json.load(handle))
+        if existing_order != parcellation_order:
+            raise ValueError(
+                f"{ids_path}: existing parcellation order differs; use a new "
+                "output directory to regenerate vectors with a different order"
+            )
+    else:
+        temporary_ids_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=output_dir,
+                prefix=".parcellation_ids.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_ids_path = Path(handle.name)
+                json.dump(parcellation_order, handle, indent=2)
+                handle.write("\n")
+            os.replace(temporary_ids_path, ids_path)
+        finally:
+            if temporary_ids_path is not None:
+                temporary_ids_path.unlink(missing_ok=True)
     scalar_columns = {
         "niche_cell_count": "N",
-        "target_niche_size": "target_niche_size",
         "selected_k_hop": "selected_k_hop",
-        "max_k_hop": "max_k_hop",
-        "target_size_reached": "target_size_reached",
         "represented_parcellation_count": "K",
-        "dominant_parcellation_fraction": "D",
         "parcellation_entropy": "H",
         "normalized_parcellation_entropy": "H_norm",
     }
     array_columns = {
-        "parcellation_ids": "parcellations",
-        "parcellation_cell_counts": "counts",
         "parcellation_fractions": "p",
     }
-    columns = ("center_cell_name", *scalar_columns, *array_columns, "niche_cell_names")
     output_paths = []
     for source_path in slice_paths:
         adata = ad.read_h5ad(source_path, backed="r")
@@ -287,15 +394,25 @@ def export_slice_niche_metrics(
             if parcellation_key not in adata.obs:
                 raise KeyError(f"{source_path}: missing obs[{parcellation_key!r}]")
             cell_names = adata.obs_names.astype(str).tolist()
+            coordinates = np.asarray(adata.obsm[spatial_key], dtype=float).copy()
             metrics = compute_candidate_niche_metrics(
-                coordinates=adata.obsm[spatial_key],
+                coordinates=coordinates,
                 labels=adata.obs[parcellation_key].to_numpy(),
                 k_hop=k_hop,
-                niche_size=niche_size,
+                niche_size=target_cell_count,
+                parcellation_order=parcellation_order,
             )
         finally:
             adata.file.close()
 
+        coordinate_columns = ["center_spatial_x", "center_spatial_y"]
+        columns = (
+            "center_cell_name",
+            *coordinate_columns,
+            *scalar_columns,
+            *array_columns,
+            "niche_cell_names",
+        )
         output_path = output_dir / f"{source_path.stem}.csv"
         temporary_path = None
         try:
@@ -311,11 +428,16 @@ def export_slice_niche_metrics(
                 temporary_path = Path(handle.name)
                 writer = csv.DictWriter(handle, fieldnames=columns)
                 writer.writeheader()
-                for cell_name, metric in zip(cell_names, metrics):
+                for cell_name, center_coordinates, metric in zip(
+                    cell_names, coordinates, metrics
+                ):
+                    if not metric["target_size_reached"]:
+                        continue
                     row = {
                         column: metric[key] for column, key in scalar_columns.items()
                     }
                     row["center_cell_name"] = cell_name
+                    row.update(zip(coordinate_columns, center_coordinates))
                     for column, key in array_columns.items():
                         row[column] = json.dumps(metric[key])
                     row["niche_cell_names"] = json.dumps(
@@ -341,9 +463,27 @@ if __name__ == "__main__":
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     source.add_argument("--h5ad-file", type=Path, help="Process only this H5AD file.")
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--k-hop", type=int, default=10, help="Maximum k to try (at least 2).")
-    parser.add_argument("--niche-size", type=int, required=True, help="Target minimum number of cells.")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Output directory (default: query_niche_metrics/<dimension>)",
+    )
+    parser.add_argument(
+        "--k-hop", type=int, default=10, help="Maximum k to try (at least 2)."
+    )
+    parser.add_argument(
+        "--niche-size",
+        type=str,
+        choices=list(QUERY_NICHE_DIMENSIONS),
+        required=True,
+        help="Target dimension from manifests/query_niche_dimensions.json.",
+    )
+    parser.add_argument(
+        "--parcellation-order",
+        type=int,
+        nargs="+",
+        help="Shared composition-vector IDs in order (default: sorted IDs across sibling slices).",
+    )
     args = parser.parse_args()
     for path in export_slice_niche_metrics(
         args.data_dir,
@@ -351,5 +491,6 @@ if __name__ == "__main__":
         h5ad_file=args.h5ad_file,
         k_hop=args.k_hop,
         niche_size=args.niche_size,
+        parcellation_order=args.parcellation_order,
     ):
         print(path)
