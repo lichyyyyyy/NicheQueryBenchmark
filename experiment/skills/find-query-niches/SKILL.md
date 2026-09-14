@@ -1,11 +1,11 @@
 ---
 name: find-query-niches
-description: Select query niches in NicheQueryBenchmark by size, composition complexity, prevalence, and pairwise non-overlap, then generate per-niche CSV, PNG, and HTML reports. Use when asked to find benchmark query center cells on a source slice.
+description: Select query niches in NicheQueryBenchmark by size, composition complexity, prevalence, and pairwise non-overlap. Generate per-niche CSV, PNG, and HTML reports only when explicitly requested. Use when asked to find benchmark query center cells on a source slice.
 ---
 
 # Find query niches
 
-Default target: exactly **3 large, simple niches**, represented by **3 distinct center cell IDs**, on **C57BL6J-638850.28**. Use another slice or dimension pair when explicitly requested. Creating or editing this skill alone does not mean running the selection workflow.
+Default target: select exactly **k mutually compatible niches**, with `k=3` unless the user requests another value, aiming for large, simple niches represented by distinct center cell IDs on **C57BL6J-638850.28**. If fewer than k valid niches survive the filters or compatibility checks, report the achieved count and shortfall rather than relaxing constraints. Use another slice or dimension pair when explicitly requested. Creating or editing this skill alone does not mean running the selection workflow.
 
 Work in `/home/sheryl/niche_query/NicheQueryBenchmark` using `.venv/bin/python`. Read `experiment/manifests/query_niche_dimensions.json` for the actual dimension rules. Currently large means at least 300 cells; simple means 1–2 nonzero parcellations and a dominant fraction in [0.85, 1.0]. Preserve cell IDs as strings throughout.
 
@@ -18,10 +18,13 @@ cd /home/sheryl/niche_query/NicheQueryBenchmark
 source_slice=C57BL6J-638850.28
 dim1=large
 dim2=simple
+k=3
 metrics_root=experiment/query_niche_metrics
 dimension_candidates="$metrics_root/filtered_query_niches_on_dimensions/$dim1/$dim2/${source_slice}.csv"
 final_candidates="$metrics_root/final_query_niche_candidates/$dim1/$dim2/${source_slice}.csv"
 report_root="$metrics_root/niche_visualizations/agent_proposed/$dim1/$dim2"
+selected_centers_csv="$report_root/${source_slice}_selected_centers.csv"
+selection_checks_json="$report_root/${source_slice}_selection_checks.json"
 ```
 
 All exported niches for a slice are in `$metrics_root/$dim1/$source_slice.csv`. This is a CSV, not a directory. Other slice CSVs in the same size directory provide the comparison populations. Shared fraction-vector IDs are in `$metrics_root/$dim1/parcellation_ids.json`; legacy rows can instead contain `parcellation_ids`.
@@ -50,37 +53,46 @@ The output contains candidate `center_cell_name` values. A header-only output me
   --output-file "$final_candidates"
 ```
 
-No dimension argument is needed: size is inferred from the `$dim1/$dim2` input directories. Each candidate must have **>100** similar niches in the source slice and **>=30 in every other available slice CSV** of that size. Counts use all eligible exported niches, not only dimension-filtered candidates.
+No dimension argument is needed: size is inferred from the `$dim1/$dim2` input directories. Each candidate must have **>100** similar niches in the source slice and **>=30 in at least 6 other available slice CSVs** of that size (6 out of the current 11 other slices; up to 5 may fail). This is a minimum of 6 qualifying target slices, not a percentage. Counts use all eligible exported niches, not only dimension-filtered candidates.
 
-Similarity follows `experiment/visualize_query_niche_v2.ipynb`: every parcellation fraction differs strictly by <0.05 in the source and <0.25 in other slices. Align by parcellation ID; absent IDs mean zero. Equality within 1e-12 is excluded. Source counts include the selected niche and overlapping neighborhoods. A target CSV with no eligible niches rejects every candidate; slices without CSVs are not compared. Disclose if no other slice CSVs exist, since cross-slice prevalence then cannot be demonstrated.
+Similarity follows `experiment/visualize_query_niche_v2.ipynb`: every parcellation fraction differs strictly by <0.05 in the source and <0.25 in other slices. Align by parcellation ID; absent IDs mean zero. Equality within 1e-12 is excluded. Source counts include the selected niche and overlapping neighborhoods. A target CSV with no eligible niches contributes no qualifying matches; slices without CSVs are not compared. Fewer than 6 available target slice CSVs means no candidate can qualify. The final candidate CSV records qualifying target slice IDs and their similar-niche counts in `target_slices` and `target_similar_niche_counts`.
 
-## 3. Select exactly three mutually compatible niches
+## 3. Select exactly k mutually compatible niches
 
-Read the final candidate CSV, then stream the source metrics CSV to recover the full rows for those centers. Raise `csv.field_size_limit` to 100,000,000 before parsing large membership fields. Apply the same size eligibility checks as the filters. Reject duplicate or missing candidate records; verify each saved membership is a unique string-ID list, includes its center, and matches `niche_cell_count`.
+Use `experiment/select_non_overlapping_niches.py` for selection:
 
-For each candidate retain:
-
-- Its string center ID and the set of all `niche_cell_names`.
-- Its set of parcellation IDs with **strictly positive** fractions. Prefer per-row IDs over the shared ID order; validate vector length and fractions before alignment. Compare IDs, never array positions. Zero fractions do not imply representation.
-
-For every selected pair A, B, both conditions must hold:
-
-```python
-members[A].isdisjoint(members[B])
-parcellations[A].isdisjoint(parcellations[B])
+```bash
+.venv/bin/python experiment/select_non_overlapping_niches.py -k "$k" \
+  --candidates "$final_candidates" \
+  --preprocessed "experiment/query_niche_metrics/preprocessed/$dim1/${source_slice}.csv" \
+  --output "$selection_checks_json"
 ```
 
-These constraints refer to the three niches on the same source slice. Distinct centers alone do not prove non-overlap. Checking only dominant parcellations is insufficient.
+The script enforces both compatibility rules: selected niches must have disjoint member-cell IDs and disjoint positively represented parcellation IDs. It returns up to `k` niches in candidate CSV order and reports `requested_k`, `achieved_k`, `shortfall`, `center_cell_names`, and `parcellation_ids`.
 
-Search for a compatible triple in final-candidate CSV order, using backtracking or compatible-pair intersections. Prune pairs with shared members or parcellations; do not materialize every triple. A greedy choice can miss a valid triple, so backtrack before declaring failure. Stop once one valid triple is found. Do not arbitrarily truncate candidates or add undocumented ranking criteria.
+Always save `$selection_checks_json` and `$selected_centers_csv`, no matter whether the user requested reports. Keep the full final-candidate CSV intact. Derive the selected-centers CSV from the JSON and source preprocessed metrics with one row per selected niche, possibly zero rows, and columns `source_slice`, `center_cell_name`, `niche_dimension`, `composition_complexity`, `niche_cell_count`, and `parcellation_ids` as a sorted JSON array.
 
-If fewer than three candidates remain or an exhaustive search finds no compatible triple, report that the requested target cannot be met and identify the failing stage. If the search is interrupted, report it as incomplete, not proof of impossibility. Never relax prevalence or overlap requirements silently or present a partial selection as success.
+Default selection artifact paths:
 
-Save the successful selection to `$report_root/${source_slice}_selected_centers.csv` with exactly three data rows and columns `source_slice`, `center_cell_name`, `niche_dimension`, `composition_complexity`, `niche_cell_count`, and `parcellation_ids` (a sorted JSON array). Save `$report_root/${source_slice}_selection_checks.json` recording the candidate-input path, source metrics path, dimension rules, and the member/parcellation intersection counts for all three pairs; all six counts must be zero. Create the report directory as needed. Keep the full final-candidate CSV intact.
+```text
+experiment/query_niche_metrics/niche_visualizations/agent_proposed/large/simple/C57BL6J-638850.28_selected_centers.csv
+experiment/query_niche_metrics/niche_visualizations/agent_proposed/large/simple/C57BL6J-638850.28_selection_checks.json
+```
 
-## 4. Generate and verify the three reports
+If `achieved_k` is less than `requested_k`, report the achieved count and shortfall. Never relax prevalence or overlap requirements silently.
 
-For each selected center, set `center_cell_name` to its exact string ID and run:
+## 4. Generate reports only when explicitly requested
+
+Only run `experiment/visualize_query_niche.py` when the user explicitly requests reports, HTML files, PNG visualizations, or other per-niche report artifacts.
+
+If the task is only to find or select query niches, stop after saving:
+
+- `$selected_centers_csv`
+- `$selection_checks_json`
+
+### Report generation
+
+For each selected center, set `center_cell_name` to the exact center-cell string ID and run:
 
 ```bash
 .venv/bin/python experiment/visualize_query_niche.py \
@@ -90,14 +102,55 @@ For each selected center, set `center_cell_name` to its exact string ID and run:
   --output-dir "$report_root/${source_slice}_${center_cell_name}"
 ```
 
-The candidate-directory argument must point to **all slice metrics in the selected size directory**, not either filtered-candidate directory. The visualization script derives size from that directory and defaults to `data/20260601_225717` for the source H5AD. Use `--data-dir` if the user specifies another data location.
+`--all-niche-candidates-dir` must point to the directory containing **all slice metrics for the selected size category** (`$metrics_root/$dim1`). Do not pass either filtered-candidate directory.
 
-Verify all nine outputs for each selected center:
+The visualization script infers the niche size from this directory and uses `data/20260601_225717` as the default source H5AD directory. Pass `--data-dir` only when the user specifies a different data location.
 
-- `metrics.csv`, `composition_summary.csv`, `center_coordinates.csv`
-- `members.csv`, `composition.csv`, `source_composition_similarity.csv`
-- `target_slice_composition.csv`, `niche.png`, `report.html`
+### Verify each generated report
 
-Recheck the source similar count (>100) and every target similar count (>=30) from the reports. Confirm reported memberships and positive-fraction parcellation IDs still satisfy all pairwise non-overlap checks. Inspect each PNG to confirm the full-slice and close-up panels, highlighted membership, and center marker are present. Preserve the notebook's calculations and report format.
+For every selected center, confirm that all nine expected artifacts exist:
 
-Finish with exactly three center IDs, their represented parcellation IDs, links to their report directories or HTML files, and the saved overlap evidence. If a report or verification fails, identify it and do not claim the workflow is complete.
+- `metrics.csv`
+- `composition_summary.csv`
+- `center_coordinates.csv`
+- `members.csv`
+- `composition.csv`
+- `source_composition_similarity.csv`
+- `target_slice_composition.csv`
+- `niche.png`
+- `report.html`
+
+Then verify that:
+
+- the source slice has more than 100 similar niches;
+- at least 6 target slices each contain at least 30 similar niches;
+- counts for **all** target slices remain in the report, including slices with fewer than 30 similar niches;
+- reported memberships and positive-fraction parcellation IDs still satisfy all pairwise non-overlap constraints;
+- `niche.png` contains the full-slice and close-up panels, highlighted niche membership, and the center-cell marker.
+
+Do not require every target slice to meet the `>=30` threshold.
+
+Preserve the notebook's existing calculations and report format.
+
+### Final output
+
+If reports were explicitly requested, return:
+
+- every selected center ID;
+- the parcellation IDs represented by each center;
+- a link or path to each report directory or `report.html`;
+- the requested number of niches versus the number successfully selected;
+- the saved `$selected_centers_csv`;
+- the saved `$selection_checks_json`.
+
+If any report generation or verification step fails, clearly identify the failure and do not state that the report workflow completed successfully.
+
+If reports were **not** explicitly requested, return:
+
+- every selected center ID;
+- the parcellation IDs represented by each center;
+- the requested number of niches versus the number successfully selected;
+- the saved `$selected_centers_csv`;
+- the saved `$selection_checks_json`.
+
+Also state that report generation was skipped because it was not explicitly requested.

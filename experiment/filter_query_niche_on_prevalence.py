@@ -1,4 +1,4 @@
-r"""Keep candidates with >100 source matches and >=30 matches in >=10 other slices.
+r"""Keep candidates with >100 source matches and >=30 matches in >=6 other slices.
 
 Example (run from the repository root)::
 
@@ -12,13 +12,13 @@ Each retained center has target_slices (a JSON array of matching target slice
 IDs) and target_similar_niche_counts (a JSON map of slice ID to match count).
 These columns are recomputed if already present in the input. Every listed
 target has >=30 similar niches; the source slice is excluded. Candidates must
-qualify in at least 10 target slices. There is still one output row per center.
+qualify in at least 6 target slices. There is still one output row per center.
 The niche size is inferred from the input's <size>/<complexity>/,
 <size>_<complexity>/, or <size>/ directory; no dimension argument is needed.
 Comparison populations are ALL eligible exported niches in metrics-dir/dimension,
 not just the input candidates. Every other CSV in that directory is checked;
 an empty slice contributes no qualifying matches, and missing CSVs are not
-compared. Fewer than 10 available target slices yields a header-only output.
+compared. Fewer than 6 available target slices yields a header-only output.
 
 Matches visualize_query_niche_v2.ipynb: every parcellation fraction must differ
 strictly by <0.05 in the source slice and <0.25 in other slices. IDs are aligned,
@@ -249,9 +249,9 @@ def filter_niche_centers(
         target_paths = [
             path for path in paths if path.resolve() != source_path.resolve()
         ]
-        if len(target_paths) < 10:
+        if len(target_paths) < 6:
             print(
-                f"Only {len(target_paths)} other slice CSVs found; at least 10 are required.",
+                f"Only {len(target_paths)} other slice CSVs found; at least 6 are required.",
                 flush=True,
             )
         for path in target_paths:
@@ -271,11 +271,11 @@ def filter_niche_centers(
             )
             del population
         retained = {
-            center for center in kept if len(target_counts[selected[center]]) >= 10
+            center for center in kept if len(target_counts[selected[center]]) >= 6
         }
         print(
             f"Retained {len(retained)}/{len(centers)} candidates with >100 source matches "
-            "and >=30 matches in at least 10 other slices",
+            "and >=30 matches in at least 6 other slices",
             flush=True,
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
