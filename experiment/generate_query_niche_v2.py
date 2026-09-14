@@ -50,7 +50,8 @@ across the input directory (including sibling slices for ``--h5ad-file``).
 The shared IDs are saved once as a JSON array in
 ``<output-dir>/parcellation_ids.json``, rather than repeated in each CSV row.
 Use ``--parcellation-order`` to fix the axis across different datasets or runs
-whose input files change. No composition filtering is applied.
+whose input files change. Pass ``--composition-complexity`` to retain only
+niches matching a manifest rule; by default no composition filtering is applied.
 """
 
 from __future__ import annotations
@@ -63,15 +64,32 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
-    from .query_niche_dimensions import QUERY_NICHE_DIMENSIONS
+    from .query_niche_dimensions import COMPOSITION_COMPLEXITY, QUERY_NICHE_DIMENSIONS
 else:
-    from query_niche_dimensions import QUERY_NICHE_DIMENSIONS
+    from query_niche_dimensions import COMPOSITION_COMPLEXITY, QUERY_NICHE_DIMENSIONS
 
 import numpy as np
 from scipy.spatial import cKDTree
 
 DEFAULT_DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "20260601_225717"
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "query_niche_metrics"
+
+
+def matches_composition_complexity(metric: dict[str, Any], rule: dict[str, Any]) -> bool:
+    """Return whether a computed niche satisfies a manifest complexity rule."""
+    count = int(metric["K"])
+    dominant = float(metric["D"])
+    if "parcellation_count_less_than" in rule and not count < rule["parcellation_count_less_than"]:
+        return False
+    if "parcellation_count_at_least" in rule and not count >= rule["parcellation_count_at_least"]:
+        return False
+    if "parcellation_count_at_most" in rule and not count <= rule["parcellation_count_at_most"]:
+        return False
+    if "dominant_parcellation_fraction_at_least" in rule and not dominant >= rule["dominant_parcellation_fraction_at_least"]:
+        return False
+    if "dominant_parcellation_fraction_at_most" in rule and not dominant <= rule["dominant_parcellation_fraction_at_most"]:
+        return False
+    return True
 
 
 def _integer_parcellations(values: Any) -> np.ndarray:
@@ -262,6 +280,7 @@ def export_slice_niche_metrics(
     spatial_key: str = "spatial",
     parcellation_key: str = "parcellation_index",
     parcellation_order: Sequence[int] | None = None,
+    composition_complexity: str | None = None,
 ) -> list[Path]:
     """Write one CSV per H5AD slice, evaluating every cell as a niche center.
 
@@ -283,11 +302,15 @@ def export_slice_niche_metrics(
     ``parcellation_ids.json`` in the output directory.
     ``niche_cell_names`` is
     a JSON array of neighborhood members. All cells and parcellations within
-    retained niches are included, with no composition filtering.
+    retained niches are included; by default no composition filtering is applied.
+    Each retained niche is also printed with its center cell name, first two
+    spatial coordinates, and nonzero parcellation fractions.
     All rows share one composition axis, with zeros for absent types. By
     default, scan labels across all slices in ``data_dir``, or all H5AD siblings
     of ``h5ad_file`` for single-file exports. ``parcellation_order`` overrides
     this scan with an explicit order that must include every exported label.
+    ``composition_complexity`` optionally filters retained niches using a
+    manifest rule; when omitted, all niches reaching the target are retained.
     An existing ``parcellation_ids.json`` must match the requested order to
     prevent changing the interpretation of previously exported vectors.
 
@@ -310,6 +333,12 @@ def export_slice_niche_metrics(
             f"niche_size must be one of: {', '.join(QUERY_NICHE_DIMENSIONS)}"
         )
     target_cell_count = QUERY_NICHE_DIMENSIONS[niche_size]
+    if composition_complexity is not None and composition_complexity not in COMPOSITION_COMPLEXITY:
+        raise ValueError(
+            f"composition_complexity must be one of: {', '.join(COMPOSITION_COMPLEXITY)}"
+        )
+    complexity_rule = (COMPOSITION_COMPLEXITY[composition_complexity]
+                       if composition_complexity is not None else None)
     data_dir = Path(data_dir)
     if output_dir is None:
         output_dir = DEFAULT_OUTPUT_DIR / niche_size
@@ -433,6 +462,23 @@ def export_slice_niche_metrics(
                 ):
                     if not metric["target_size_reached"]:
                         continue
+                    if complexity_rule is not None and not matches_composition_complexity(
+                        metric, complexity_rule
+                    ):
+                        continue
+                    parcellation_fractions = [
+                        f"{parcellation_id}: {fraction:.6f}"
+                        for parcellation_id, fraction in zip(
+                            metric["parcellations"], metric["p"]
+                        )
+                        if fraction > 0.0
+                    ]
+                    print(
+                        f"Cell {cell_name}: "
+                        f"coordinate=({center_coordinates[0]:.6f}, "
+                        f"{center_coordinates[1]:.6f}); "
+                        f"parcellations={{{', '.join(parcellation_fractions)}}}"
+                    )
                     row = {
                         column: metric[key] for column, key in scalar_columns.items()
                     }
@@ -484,6 +530,11 @@ if __name__ == "__main__":
         nargs="+",
         help="Shared composition-vector IDs in order (default: sorted IDs across sibling slices).",
     )
+    parser.add_argument(
+        "--composition-complexity",
+        choices=list(COMPOSITION_COMPLEXITY),
+        help="Optional composition rule from the manifest (default: keep all complexities).",
+    )
     args = parser.parse_args()
     for path in export_slice_niche_metrics(
         args.data_dir,
@@ -492,5 +543,6 @@ if __name__ == "__main__":
         k_hop=args.k_hop,
         niche_size=args.niche_size,
         parcellation_order=args.parcellation_order,
+        composition_complexity=args.composition_complexity,
     ):
         print(path)

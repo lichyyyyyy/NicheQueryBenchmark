@@ -5,7 +5,10 @@ from pathlib import Path
 
 MANIFEST_PATH = Path(__file__).with_name("manifests") / "query_niche_dimensions.json"
 with MANIFEST_PATH.open(encoding="utf-8") as handle:
-    QUERY_NICHE_DIMENSIONS = json.load(handle)
+    _manifest = json.load(handle)
+
+COMPOSITION_COMPLEXITY = _manifest.get("composition_complexity", {})
+QUERY_NICHE_DIMENSIONS = _manifest["niche_size"]
 
 
 def parse_niche_size(value: str) -> int:

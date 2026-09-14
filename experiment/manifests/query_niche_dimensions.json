@@ -1,5 +1,27 @@
 {
-  "large": 300,
-  "median": 100,
-  "small": 20
+  "niche_size": {
+    "large": 300,
+    "median": 100,
+    "small": 20
+  },
+  "composition_complexity": {
+    "simple": {
+      "parcellation_count_at_least": 1,
+      "parcellation_count_at_most": 2,
+      "dominant_parcellation_fraction_at_least": 0.85,
+      "dominant_parcellation_fraction_at_most": 1.0
+    },
+    "median": {
+      "parcellation_count_at_least": 2,
+      "parcellation_count_at_most": 3,
+      "dominant_parcellation_fraction_at_least": 0.35,
+      "dominant_parcellation_fraction_at_most": 0.55
+    },
+    "heterogeneous": {
+      "parcellation_count_at_least": 4,
+      "parcellation_count_at_most": 5,
+      "dominant_parcellation_fraction_at_least": 0.25,
+      "dominant_parcellation_fraction_at_most": 0.35
+    }
+  }
 }
