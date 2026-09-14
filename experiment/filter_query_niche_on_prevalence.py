@@ -1,4 +1,4 @@
-r"""Keep candidates with >100 source matches and >=30 matches in >=6 other slices.
+r"""Keep candidates with >100 source matches and >=MIN_MATCHED_NICHES matches in >=REQUIRED_MATCHED_SLICE other slices.
 
 Example (run from the repository root)::
 
@@ -11,14 +11,14 @@ are preserved). Output defaults to <input-stem>_prevalence.csv beside the input.
 Each retained center has target_slices (a JSON array of matching target slice
 IDs) and target_similar_niche_counts (a JSON map of slice ID to match count).
 These columns are recomputed if already present in the input. Every listed
-target has >=30 similar niches; the source slice is excluded. Candidates must
-qualify in at least 6 target slices. There is still one output row per center.
+target has >=MIN_MATCHED_NICHES similar niches; the source slice is excluded. Candidates must
+qualify in at least REQUIRED_MATCHED_SLICE target slices. There is still one output row per center.
 The niche size is inferred from the input's <size>/<complexity>/,
 <size>_<complexity>/, or <size>/ directory; no dimension argument is needed.
 Comparison populations are ALL eligible exported niches in metrics-dir/dimension,
 not just the input candidates. Every other CSV in that directory is checked;
 an empty slice contributes no qualifying matches, and missing CSVs are not
-compared. Fewer than 6 available target slices yields a header-only output.
+compared. Fewer than REQUIRED_MATCHED_SLICE available target slices yields a header-only output.
 
 Matches visualize_query_niche_v2.ipynb: every parcellation fraction must differ
 strictly by <0.05 in the source slice and <0.25 in other slices. IDs are aligned,
@@ -47,6 +47,8 @@ else:
 DEFAULT_METRICS_DIR = Path(__file__).resolve().parent / "query_niche_metrics"
 SOURCE_THRESHOLD = 0.05
 TARGET_THRESHOLD = 0.25
+REQUIRED_MATCHED_SLICE = 6
+MIN_MATCHED_NICHES = 10
 
 
 def validated_ids(values):
@@ -160,6 +162,7 @@ def filter_niche_centers(
     *,
     metrics_dir=DEFAULT_METRICS_DIR,
     output_file=None,
+    exclude_slices=(),
 ):
     """Filter a single source/dimension candidate CSV, preserving columns and order."""
     if (
@@ -168,6 +171,17 @@ def filter_niche_centers(
         or source_slice in {".", ".."}
     ):
         raise ValueError("source_slice must be a slice name without directories")
+    excluded = set(exclude_slices or ())
+    invalid_excluded = [
+        name
+        for name in excluded
+        if not name or Path(name).name != name or name in {".", ".."}
+    ]
+    if invalid_excluded:
+        raise ValueError(
+            "exclude_slices must contain slice names without directories: "
+            f"{sorted(invalid_excluded)}"
+        )
     input_path = Path(input_file)
     parent = input_path.absolute().parent
     combined_dimensions = {
@@ -247,11 +261,24 @@ def filter_niche_centers(
         )
         del population
         target_paths = [
-            path for path in paths if path.resolve() != source_path.resolve()
+            path
+            for path in paths
+            if path.resolve() != source_path.resolve() and path.stem not in excluded
         ]
-        if len(target_paths) < 6:
+        if excluded:
+            excluded_available = sorted(
+                path.stem
+                for path in paths
+                if path.resolve() != source_path.resolve() and path.stem in excluded
+            )
             print(
-                f"Only {len(target_paths)} other slice CSVs found; at least 6 are required.",
+                f"Excluded {len(excluded_available)} target slice CSVs: "
+                + ", ".join(excluded_available),
+                flush=True,
+            )
+        if len(target_paths) < REQUIRED_MATCHED_SLICE:
+            print(
+                f"Only {len(target_paths)} other slice CSVs found; at least REQUIRED_MATCHED_SLICE are required.",
                 flush=True,
             )
         for path in target_paths:
@@ -262,20 +289,24 @@ def filter_niche_centers(
                 {selected[center] for center in kept}, population, TARGET_THRESHOLD
             )
             for composition in {selected[center] for center in kept}:
-                if counts[composition] >= 30:
+                if counts[composition] >= MIN_MATCHED_NICHES:
                     target_counts[composition][path.stem] = counts[composition]
-            qualifying_count = sum(counts[selected[center]] >= 30 for center in kept)
+            qualifying_count = sum(
+                counts[selected[center]] >= MIN_MATCHED_NICHES for center in kept
+            )
             print(
-                f"{path.stem}: {qualifying_count} candidates have >=30 matches",
+                f"{path.stem}: {qualifying_count} candidates have >={MIN_MATCHED_NICHES} matches",
                 flush=True,
             )
             del population
         retained = {
-            center for center in kept if len(target_counts[selected[center]]) >= 6
+            center
+            for center in kept
+            if len(target_counts[selected[center]]) >= REQUIRED_MATCHED_SLICE
         }
         print(
             f"Retained {len(retained)}/{len(centers)} candidates with >100 source matches "
-            "and >=30 matches in at least 6 other slices",
+            f"and >={MIN_MATCHED_NICHES} matches in at least REQUIRED_MATCHED_SLICE other slices",
             flush=True,
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -323,6 +354,13 @@ if __name__ == "__main__":
     parser.add_argument("--source-slice", required=True)
     parser.add_argument("--metrics-dir", type=Path, default=DEFAULT_METRICS_DIR)
     parser.add_argument("--output-file", type=Path)
+    parser.add_argument(
+        "--exclude-slice",
+        dest="exclude_slices",
+        action="append",
+        default=[],
+        help="Target slice CSV stem to exclude from prevalence comparisons. Repeatable.",
+    )
     args = parser.parse_args()
     try:
         result = filter_niche_centers(**vars(args))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select mutually non-overlapping query niches from exported metric CSVs.
+"""Select query niches from exported metric CSVs with bounded cell overlap.
 
 Example::
 
@@ -7,12 +7,13 @@ Example::
         --candidates experiment/query_niche_metrics/final_query_niche_candidates/large/simple/C57BL6J-638850.28.csv \
         --preprocessed experiment/query_niche_metrics/preprocessed/large/C57BL6J-638850.28.csv
 
-Two niches are compatible only when they have disjoint member-cell IDs and
-disjoint positively represented parcellation IDs.  Candidate CSV order is
-preserved when several maximum-size selections exist.
+Two niches are compatible only when their member-cell overlap is at most
+``--max-cell-overlap-percent`` of the smaller niche. Candidate CSV order is
+preserved when several maximum-size selections exist. The default threshold is
+0, matching the previous strict non-overlap behavior.
 
-members[A].isdisjoint(members[B])
-parcellations[A].isdisjoint(parcellations[B])
+len(members[A] & members[B]) / min(len(members[A]), len(members[B]))
+    <= max_cell_overlap_percent / 100
 
 """
 
@@ -96,7 +97,16 @@ def load_niches(candidates: Path, preprocessed: Path) -> list[Niche]:
     return result
 
 
-def select(niches: list[Niche], k: int) -> list[Niche]:
+def cell_overlap_fraction(first: Niche, second: Niche) -> float:
+    denominator = min(len(first.members), len(second.members))
+    if denominator == 0:
+        raise ValueError("niches must contain at least one member cell")
+    return len(first.members & second.members) / denominator
+
+
+def select(
+    niches: list[Niche], k: int, *, max_cell_overlap_fraction: float = 0.0
+) -> list[Niche]:
     best: list[int] = []
 
     def search(pos: int, chosen: list[int]) -> None:
@@ -108,8 +118,7 @@ def select(niches: list[Niche], k: int) -> list[Niche]:
         for index in range(pos, len(niches)):
             candidate = niches[index]
             if all(
-                candidate.members.isdisjoint(niches[j].members)
-                and candidate.parcellations.isdisjoint(niches[j].parcellations)
+                cell_overlap_fraction(candidate, niches[j]) <= max_cell_overlap_fraction
                 for j in chosen
             ):
                 chosen.append(index)
@@ -125,16 +134,32 @@ def main() -> None:
     parser.add_argument("--candidates", required=True, type=Path)
     parser.add_argument("--preprocessed", required=True, type=Path)
     parser.add_argument("-k", type=int, default=3)
+    parser.add_argument(
+        "--max-cell-overlap-percent",
+        type=float,
+        default=0.0,
+        help=(
+            "Maximum pairwise member-cell overlap as a percent of the smaller "
+            "niche. Default: 0."
+        ),
+    )
     parser.add_argument("--output", type=Path, help="JSON output; stdout by default")
     args = parser.parse_args()
     if args.k < 1:
         parser.error("-k must be positive")
+    if not 0 <= args.max_cell_overlap_percent <= 100:
+        parser.error("--max-cell-overlap-percent must be between 0 and 100")
     niches = load_niches(args.candidates, args.preprocessed)
-    selected = select(niches, args.k)
+    selected = select(
+        niches,
+        args.k,
+        max_cell_overlap_fraction=args.max_cell_overlap_percent / 100.0,
+    )
     payload = {
         "requested_k": args.k,
         "achieved_k": len(selected),
         "shortfall": max(0, args.k - len(selected)),
+        "max_cell_overlap_percent": args.max_cell_overlap_percent,
         "center_cell_names": [n.center for n in selected],
         "parcellation_ids": {n.center: sorted(n.parcellations) for n in selected},
     }
