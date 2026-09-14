@@ -4,7 +4,7 @@ Run one slice from the repository root::
 
     .venv/bin/python experiment/generate_query_niche_v2.py \
         --h5ad-file data/20260601_225717/C57BL6J-638850.28.h5ad \
-        --output-dir experiment/query_niche_metrics/large --k-hop 10 --niche-size large
+        --output-dir experiment/query_niche_metrics/preprocess/large --k-hop 10 --niche-size large
 
 This writes ``experiment/query_niche_metrics/C57BL6J-638850.28.csv`` with one row per
 center cell whose niche reaches the target size. Omit ``--h5ad-file`` to process all H5AD files in the default data
@@ -75,19 +75,36 @@ DEFAULT_DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "20260601_2257
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "query_niche_metrics"
 
 
-def matches_composition_complexity(metric: dict[str, Any], rule: dict[str, Any]) -> bool:
+def matches_composition_complexity(
+    metric: dict[str, Any], rule: dict[str, Any]
+) -> bool:
     """Return whether a computed niche satisfies a manifest complexity rule."""
     count = int(metric["K"])
     dominant = float(metric["D"])
-    if "parcellation_count_less_than" in rule and not count < rule["parcellation_count_less_than"]:
+    if (
+        "parcellation_count_less_than" in rule
+        and not count < rule["parcellation_count_less_than"]
+    ):
         return False
-    if "parcellation_count_at_least" in rule and not count >= rule["parcellation_count_at_least"]:
+    if (
+        "parcellation_count_at_least" in rule
+        and not count >= rule["parcellation_count_at_least"]
+    ):
         return False
-    if "parcellation_count_at_most" in rule and not count <= rule["parcellation_count_at_most"]:
+    if (
+        "parcellation_count_at_most" in rule
+        and not count <= rule["parcellation_count_at_most"]
+    ):
         return False
-    if "dominant_parcellation_fraction_at_least" in rule and not dominant >= rule["dominant_parcellation_fraction_at_least"]:
+    if (
+        "dominant_parcellation_fraction_at_least" in rule
+        and not dominant >= rule["dominant_parcellation_fraction_at_least"]
+    ):
         return False
-    if "dominant_parcellation_fraction_at_most" in rule and not dominant <= rule["dominant_parcellation_fraction_at_most"]:
+    if (
+        "dominant_parcellation_fraction_at_most" in rule
+        and not dominant <= rule["dominant_parcellation_fraction_at_most"]
+    ):
         return False
     return True
 
@@ -333,12 +350,18 @@ def export_slice_niche_metrics(
             f"niche_size must be one of: {', '.join(QUERY_NICHE_DIMENSIONS)}"
         )
     target_cell_count = QUERY_NICHE_DIMENSIONS[niche_size]
-    if composition_complexity is not None and composition_complexity not in COMPOSITION_COMPLEXITY:
+    if (
+        composition_complexity is not None
+        and composition_complexity not in COMPOSITION_COMPLEXITY
+    ):
         raise ValueError(
             f"composition_complexity must be one of: {', '.join(COMPOSITION_COMPLEXITY)}"
         )
-    complexity_rule = (COMPOSITION_COMPLEXITY[composition_complexity]
-                       if composition_complexity is not None else None)
+    complexity_rule = (
+        COMPOSITION_COMPLEXITY[composition_complexity]
+        if composition_complexity is not None
+        else None
+    )
     data_dir = Path(data_dir)
     if output_dir is None:
         output_dir = DEFAULT_OUTPUT_DIR / niche_size
@@ -462,8 +485,9 @@ def export_slice_niche_metrics(
                 ):
                     if not metric["target_size_reached"]:
                         continue
-                    if complexity_rule is not None and not matches_composition_complexity(
-                        metric, complexity_rule
+                    if (
+                        complexity_rule is not None
+                        and not matches_composition_complexity(metric, complexity_rule)
                     ):
                         continue
                     parcellation_fractions = [

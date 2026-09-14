@@ -1,0 +1,4 @@
+interface:
+  display_name: "Find Query Niches"
+  short_description: "Select disjoint query niches and generate reports"
+  default_prompt: "Use $find-query-niches to find exactly three large, simple query niches on C57BL6J-638850.28 and generate their reports."
