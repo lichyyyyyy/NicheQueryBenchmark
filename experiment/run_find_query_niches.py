@@ -173,12 +173,22 @@ def parse_args() -> argparse.Namespace:
         "--source-slice",
         default=DEFAULT_SOURCE_SLICE,
         help=(
-            "Source slice stem. Pass an empty string to run all slices under "
-            "metrics-root/preprocessed/<dimension[0]>."
+            "Source slice stem, or a comma-separated list of stems. Pass an empty "
+            "string to run all slices under metrics-root/preprocessed/<dimension[0]>."
         ),
     )
     parser.add_argument("--dimension", nargs=2, default=DEFAULT_DIMENSIONS)
     parser.add_argument("-k", type=int, default=DEFAULT_K)
+    parser.add_argument(
+        "--max-cell-overlap-percent",
+        "--max_cell_overlap_percent",
+        type=float,
+        default=0.0,
+        help=(
+            "Maximum pairwise member-cell overlap as a percent of the smaller "
+            "niche when selecting non-overlapping niches. Default: 0."
+        ),
+    )
     parser.add_argument(
         "--metrics-root",
         type=Path,
@@ -213,9 +223,29 @@ def resolve_source_slices(
     dim1: str,
 ) -> list[str]:
     if source_slice:
-        if Path(source_slice).name != source_slice or source_slice in {".", ".."}:
-            raise ValueError("--source-slice must be a slice name without directories")
-        return [source_slice]
+        source_slices: list[str] = []
+        seen: set[str] = set()
+        invalid: list[str] = []
+        for raw_name in source_slice.split(","):
+            name = raw_name.strip()
+            if not name:
+                continue
+            if Path(name).name != name or name in {".", ".."}:
+                invalid.append(name)
+                continue
+            if name not in seen:
+                source_slices.append(name)
+                seen.add(name)
+        if invalid:
+            raise ValueError(
+                "--source-slice values must be slice names without directories: "
+                f"{sorted(invalid)}"
+            )
+        if not source_slices:
+            raise ValueError(
+                "--source-slice must include at least one slice name when non-empty"
+            )
+        return source_slices
 
     preprocessed_dir = root / metrics_root / "preprocessed" / dim1
     require_dir(preprocessed_dir, "preprocessed source-slice directory")
@@ -335,6 +365,8 @@ def run_for_source_slice(
             str(final_candidates),
             "--preprocessed",
             str(preprocessed_csv),
+            "--max-cell-overlap-percent",
+            str(args.max_cell_overlap_percent),
             "--output",
             str(selection_checks_json),
         ],
@@ -400,6 +432,8 @@ def main() -> int:
     args = parse_args()
     if args.k < 1:
         raise ValueError("-k must be positive")
+    if not 0 <= args.max_cell_overlap_percent <= 100:
+        raise ValueError("--max-cell-overlap-percent must be between 0 and 100")
     args.exclude_slices = normalize_exclude_slices(args.exclude_slices)
     invalid_excluded = [
         name

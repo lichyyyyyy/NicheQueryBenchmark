@@ -1,4 +1,4 @@
-r"""Keep candidates with >100 source matches and >=MIN_MATCHED_NICHES matches in >=REQUIRED_MATCHED_SLICE other slices.
+r"""Keep candidates with >SOURCE_MIN_MATCHED_NICHES source matches and >=MIN_MATCHED_NICHES matches in >=REQUIRED_MATCHED_SLICE other slices.
 
 Example (run from the repository root)::
 
@@ -49,6 +49,7 @@ SOURCE_THRESHOLD = 0.05
 TARGET_THRESHOLD = 0.25
 REQUIRED_MATCHED_SLICE = 6
 MIN_MATCHED_NICHES = 10
+SOURCE_MIN_MATCHED_NICHES = 9
 
 
 def validated_ids(values):
@@ -251,12 +252,16 @@ def filter_niche_centers(
                 f"Candidates absent from eligible source niches: {sorted(missing)[:5]}"
             )
         counts = similar_counts(set(selected.values()), population, SOURCE_THRESHOLD)
-        kept = [center for center in centers if counts[selected[center]] > 100]
+        kept = [
+            center
+            for center in centers
+            if counts[selected[center]] > SOURCE_MIN_MATCHED_NICHES
+        ]
         target_counts = {
             composition: {} for composition in {selected[center] for center in kept}
         }
         print(
-            f"{source_slice}: {len(kept)}/{len(centers)} candidates have >100 source matches",
+            f"{source_slice}: {len(kept)}/{len(centers)} candidates have >{SOURCE_MIN_MATCHED_NICHES} source matches",
             flush=True,
         )
         del population
@@ -305,8 +310,8 @@ def filter_niche_centers(
             if len(target_counts[selected[center]]) >= REQUIRED_MATCHED_SLICE
         }
         print(
-            f"Retained {len(retained)}/{len(centers)} candidates with >100 source matches "
-            f"and >={MIN_MATCHED_NICHES} matches in at least REQUIRED_MATCHED_SLICE other slices",
+            f"Retained {len(retained)}/{len(centers)} candidates with >{SOURCE_MIN_MATCHED_NICHES} source matches "
+            f"and >={MIN_MATCHED_NICHES} matches in at least {REQUIRED_MATCHED_SLICE} other slices",
             flush=True,
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
