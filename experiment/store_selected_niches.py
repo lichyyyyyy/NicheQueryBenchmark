@@ -20,7 +20,8 @@ Example::
         --niche-size large --composition-complexity simple
 
 Use ``--dry-run`` to validate inputs and report planned columns without writing
-the H5AD files.
+the H5AD files. Existing obs columns are skipped by default; pass
+``--overwrite`` to replace them.
 """
 
 from __future__ import annotations
@@ -240,17 +241,18 @@ def store_niches_for_slice(
                 niche_size=niche_size,
                 composition_complexity=composition_complexity,
             )
+            if obs_key in adata.obs and not overwrite:
+                print(
+                    f"Skipping existing obs column {obs_key!r} in {h5ad_path.name}; "
+                    "already stored."
+                )
+                continue
             missing_members = sorted(niche.members - available)
             if missing_members:
                 examples = ", ".join(missing_members[:5])
                 raise ValueError(
                     f"{h5ad_path}: {obs_key} has {len(missing_members)} "
                     f"member cell(s) absent from the H5AD; examples: {examples}"
-                )
-            if obs_key in adata.obs and not overwrite:
-                raise ValueError(
-                    f"{h5ad_path}: obs column {obs_key!r} already exists; "
-                    "pass --overwrite to replace it"
                 )
             if not dry_run:
                 adata.obs[obs_key] = np.fromiter(
@@ -260,7 +262,7 @@ def store_niches_for_slice(
                 )
             written_keys.append(obs_key)
 
-        if not dry_run:
+        if written_keys and not dry_run:
             atomic_write_h5ad(adata, h5ad_path)
         return written_keys
     finally:
@@ -292,7 +294,10 @@ def main() -> None:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Replace existing selected-niche adata.obs columns.",
+        help=(
+            "Replace existing selected-niche adata.obs columns. By default, "
+            "existing niches are skipped."
+        ),
     )
     parser.add_argument(
         "--dry-run",

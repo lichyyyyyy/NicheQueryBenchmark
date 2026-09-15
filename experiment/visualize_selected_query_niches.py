@@ -8,7 +8,11 @@ Example
 -------
 Run from the repository root::
 
-    python experiment/draw_agent_selected_niches.py
+    python experiment/visualize_selected_query_niches.py
+
+Or choose the selected niche dimensions::
+
+    python experiment/visualize_selected_query_niches.py --dimension large simple
 """
 
 from __future__ import annotations
@@ -40,18 +44,18 @@ except ImportError:  # pragma: no cover - exercised only in minimal envs.
 EXPERIMENT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EXPERIMENT_DIR.parent
 DEFAULT_SELECTION_DIR = (
-    EXPERIMENT_DIR
-    / "query_niche_metrics/niche_visualizations/agent_proposed/large/simple"
+    EXPERIMENT_DIR / "query_niche_metrics/niche_visualizations/agent_proposed"
 )
-DEFAULT_PREPROCESSED_DIR = EXPERIMENT_DIR / "query_niche_metrics/preprocessed/large"
+DEFAULT_PREPROCESSED_DIR = EXPERIMENT_DIR / "query_niche_metrics/preprocessed"
 DEFAULT_DATA_DIR = REPO_ROOT / "data/20260601_225717"
 DEFAULT_OUTPUT_DIR = (
-    EXPERIMENT_DIR
-    / "query_niche_metrics/niche_visualizations/agent_proposed/large/simple/visualizations"
+    EXPERIMENT_DIR / "query_niche_metrics/niche_visualizations/agent_proposed"
 )
 BACKGROUND_COLOR = "#d3d3d3"
 NICHE_COLOR = "#d62728"
 CENTER_COLOR = "#ffd700"
+DEFAULT_NICHE_SIZE = "large"
+DEFAULT_COMPOSITION_COMPLEXITY = "simple"
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,18 @@ class SelectedNiche:
 def resolve_path(value: Path | str) -> Path:
     path = Path(value).expanduser()
     return path if path.is_absolute() else REPO_ROOT / path
+
+
+def validate_dimension_part(value: str, *, label: str) -> str:
+    name = str(value).strip()
+    if (
+        not name
+        or Path(name).name != name
+        or name in {".", ".."}
+        or any(character.isspace() for character in name)
+    ):
+        raise ValueError(f"{label} must be a single path-safe name, got {value!r}")
+    return name
 
 
 def read_selection_file(path: Path) -> tuple[str, list[str]]:
@@ -471,13 +487,28 @@ img {{
 
 def draw_selected_niches(
     *,
-    selection_dir: Path = DEFAULT_SELECTION_DIR,
-    preprocessed_dir: Path = DEFAULT_PREPROCESSED_DIR,
+    niche_size: str = DEFAULT_NICHE_SIZE,
+    composition_complexity: str = DEFAULT_COMPOSITION_COMPLEXITY,
+    selection_dir: Path | None = None,
+    preprocessed_dir: Path | None = None,
     data_dir: Path = DEFAULT_DATA_DIR,
-    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    output_dir: Path | None = None,
     spatial_key: str = "spatial",
     invert_y_axis: bool = False,
 ) -> list[Path]:
+    niche_size = validate_dimension_part(niche_size, label="--niche-size")
+    composition_complexity = validate_dimension_part(
+        composition_complexity, label="--composition-complexity"
+    )
+    if selection_dir is None:
+        selection_dir = DEFAULT_SELECTION_DIR / niche_size / composition_complexity
+    if preprocessed_dir is None:
+        preprocessed_dir = DEFAULT_PREPROCESSED_DIR / niche_size
+    if output_dir is None:
+        output_dir = (
+            DEFAULT_OUTPUT_DIR / niche_size / composition_complexity / "visualizations"
+        )
+
     selection_dir = resolve_path(selection_dir)
     preprocessed_dir = resolve_path(preprocessed_dir)
     data_dir = resolve_path(data_dir)
@@ -510,15 +541,49 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--selection-dir", type=Path, default=DEFAULT_SELECTION_DIR)
     parser.add_argument(
-        "--preprocessed-dir", type=Path, default=DEFAULT_PREPROCESSED_DIR
+        "--dimension",
+        nargs=2,
+        metavar=("NICHE_SIZE", "COMPOSITION_COMPLEXITY"),
+        help="Selected niche dimensions, e.g. large simple.",
+    )
+    parser.add_argument("--niche-size", default=DEFAULT_NICHE_SIZE)
+    parser.add_argument(
+        "--composition-complexity", default=DEFAULT_COMPOSITION_COMPLEXITY
+    )
+    parser.add_argument(
+        "--selection-dir",
+        type=Path,
+        help=(
+            "Directory containing *_selected_centers.csv files. Default: "
+            "query_niche_metrics/niche_visualizations/agent_proposed/"
+            "<niche-size>/<composition-complexity>."
+        ),
+    )
+    parser.add_argument(
+        "--preprocessed-dir",
+        type=Path,
+        help=(
+            "Directory containing preprocessed <slice>.csv files. Default: "
+            "query_niche_metrics/preprocessed/<niche-size>."
+        ),
     )
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help=(
+            "Visualization output directory. Default: "
+            "query_niche_metrics/niche_visualizations/agent_proposed/"
+            "<niche-size>/<composition-complexity>/visualizations."
+        ),
+    )
     parser.add_argument("--spatial-key", default="spatial")
     parser.add_argument("--invert-y-axis", action="store_true")
     args = parser.parse_args()
+    if args.dimension is not None:
+        args.niche_size, args.composition_complexity = args.dimension
+    del args.dimension
     try:
         outputs = draw_selected_niches(**vars(args))
     except (ValueError, OSError, KeyError, TypeError) as error:
