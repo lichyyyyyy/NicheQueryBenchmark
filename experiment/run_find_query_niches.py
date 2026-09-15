@@ -6,7 +6,7 @@ Default behavior matches the find-query-niches skill:
     .venv/bin/python experiment/run_find_query_niches.py
 
 It filters dimension-qualified niches, filters by prevalence, selects up to k
-mutually compatible niches, and writes both selection artifacts. Per-niche
+mutually compatible niches, and writes the selected centers CSV. Per-niche
 HTML/PNG reports are generated only when --reports is passed.
 """
 
@@ -57,6 +57,28 @@ def run_command(command: list[str], root: Path) -> None:
     subprocess.run(command, cwd=root, check=True)
 
 
+def run_json_command(command: list[str], root: Path) -> dict:
+    print("+ " + " ".join(command), flush=True)
+    completed = subprocess.run(
+        command,
+        cwd=root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    if completed.stderr:
+        print(completed.stderr, end="", file=sys.stderr)
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "selection command did not emit valid JSON on stdout"
+        ) from exc
+    payload.setdefault("center_cell_names", [])
+    payload.setdefault("parcellation_ids", {})
+    return payload
+
+
 def require_file(path: Path, description: str) -> None:
     if not path.is_file():
         raise FileNotFoundError(f"missing {description}: {path}")
@@ -65,14 +87,6 @@ def require_file(path: Path, description: str) -> None:
 def require_dir(path: Path, description: str) -> None:
     if not path.is_dir():
         raise FileNotFoundError(f"missing {description}: {path}")
-
-
-def read_selection(path: Path) -> dict:
-    with path.open(encoding="utf-8") as handle:
-        payload = json.load(handle)
-    payload.setdefault("center_cell_names", [])
-    payload.setdefault("parcellation_ids", {})
-    return payload
 
 
 def write_selected_centers_csv(
@@ -314,7 +328,6 @@ def run_for_source_slice(
     preprocessed_csv = metrics_root / "preprocessed" / dim1 / f"{source_slice}.csv"
     report_root = metrics_root / "niche_visualizations/agent_proposed" / dim1 / dim2
     selected_centers_csv = report_root / f"{source_slice}_selected_centers.csv"
-    selection_checks_json = report_root / f"{source_slice}_selection_checks.json"
 
     require_file(
         root / input_metrics_root / dim1 / f"{source_slice}.csv", "source metrics CSV"
@@ -353,7 +366,7 @@ def run_for_source_slice(
         str(final_candidates),
     ]
     run_command(prevalence_command, root)
-    run_command(
+    selection = run_json_command(
         [
             str(python),
             "experiment/select_non_overlapping_niches.py",
@@ -365,13 +378,10 @@ def run_for_source_slice(
             str(preprocessed_csv),
             "--max-cell-overlap-percent",
             str(args.max_cell_overlap_percent),
-            "--output",
-            str(selection_checks_json),
         ],
         root,
     )
 
-    selection = read_selection(root / selection_checks_json)
     write_selected_centers_csv(
         selection=selection,
         source_slice=source_slice,
@@ -404,7 +414,6 @@ def run_for_source_slice(
         parcellations = selection["parcellation_ids"].get(str(center), [])
         print(f"  {center}: {parcellations}")
     print(f"selected_centers_csv: {selected_centers_csv}")
-    print(f"selection_checks_json: {selection_checks_json}")
     if args.exclude_slices:
         print(f"excluded source slices: {sorted(args.exclude_slices)}")
     if report_dirs:
@@ -422,7 +431,6 @@ def run_for_source_slice(
         "achieved_k": selection.get("achieved_k", 0),
         "shortfall": selection.get("shortfall", 0),
         "selected_centers_csv": str(selected_centers_csv),
-        "selection_checks_json": str(selection_checks_json),
     }
 
 

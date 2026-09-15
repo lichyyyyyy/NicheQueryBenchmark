@@ -60,7 +60,8 @@ RESULT_COLUMNS = (
 # Database.construct_from_sample_adatas uses ``gene_expression`` for adata.X;
 # every other value is interpreted as an adata.obsm key.
 DEFAULT_EMBEDDING_FEATURES = {
-    "gene_expr_quest": "X_gene_expr_quest",
+    "quest_gene_expr": "X_quest_gene_expr",
+    "quest_scgpt": "X_quest_scgpt",
     "scgpt": "X_scgpt",
     "gene_expr": "gene_expression",
 }

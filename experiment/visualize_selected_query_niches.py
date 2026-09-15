@@ -1,6 +1,6 @@
 """Draw selected agent-proposed niches for each source slice.
 
-The script reads ``*_selection_checks.json`` files produced by the agent
+The script reads ``*_selected_centers.csv`` files produced by the agent
 selection step, resolves each selected center cell in the matching preprocessed
 niche CSV, and writes one spatial PNG per source slice.
 
@@ -69,16 +69,29 @@ def resolve_path(value: Path | str) -> Path:
 
 
 def read_selection_file(path: Path) -> tuple[str, list[str]]:
-    if not path.name.endswith("_selection_checks.json"):
+    if not path.name.endswith("_selected_centers.csv"):
         raise ValueError(f"Unexpected selection filename: {path.name}")
-    slice_name = path.name[: -len("_selection_checks.json")]
-    with path.open(encoding="utf-8") as handle:
-        payload = json.load(handle)
-    centers = payload.get("center_cell_names")
-    if not isinstance(centers, list) or not all(isinstance(x, str) for x in centers):
-        raise ValueError(f"{path}: center_cell_names must be a list of strings")
+    slice_name = path.name[: -len("_selected_centers.csv")]
+    centers: list[str] = []
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        required = {"source_slice", "center_cell_name"}
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"{path}: missing columns {sorted(missing)}")
+        for row in reader:
+            source_slice = str(row["source_slice"]).strip()
+            if source_slice != slice_name:
+                raise ValueError(
+                    f"{path}: source_slice={source_slice!r} does not match "
+                    f"file slice {slice_name!r}"
+                )
+            center = str(row["center_cell_name"]).strip()
+            if not center:
+                raise ValueError(f"{path}: empty center_cell_name")
+            centers.append(center)
     if len(set(centers)) != len(centers):
-        raise ValueError(f"{path}: duplicate center_cell_names")
+        raise ValueError(f"{path}: duplicate center_cell_name values")
     return slice_name, centers
 
 
@@ -443,7 +456,7 @@ img {{
 <main>
 <header>
 <h1>Agent-selected niche graphs</h1>
-<p>{len(output_paths)} source-slice figures generated from selection checks.</p>
+<p>{len(output_paths)} source-slice figures generated from selected-center CSVs.</p>
 </header>
 <section class="gallery">
 {"".join(cards)}
@@ -470,9 +483,9 @@ def draw_selected_niches(
     data_dir = resolve_path(data_dir)
     output_dir = resolve_path(output_dir)
 
-    selection_paths = sorted(selection_dir.glob("*_selection_checks.json"))
+    selection_paths = sorted(selection_dir.glob("*_selected_centers.csv"))
     if not selection_paths:
-        raise FileNotFoundError(f"No *_selection_checks.json files in {selection_dir}")
+        raise FileNotFoundError(f"No *_selected_centers.csv files in {selection_dir}")
 
     outputs = []
     for selection_path in selection_paths:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate query niche manifests from stored AnnData obs niche masks.
+"""Generate query manifests from stored AnnData obs niche masks.
 
 The generator scans source slice H5AD files for obs columns named like::
 
@@ -9,6 +9,8 @@ Each matching obs column becomes one row in ``query_niche_manifest.csv`` with
 the obs column name as ``query_niche_id``. Niche size, k-hop, parcellation IDs,
 and parcellation composition are resolved from the corresponding preprocessed
 CSV row in ``query_niche_metrics/preprocessed/<niche-size>/<source_slice>.csv``.
+The script also writes ``query_manifest.csv`` with one row for each query niche,
+embedding type, and non-source target slice.
 
 Example::
 
@@ -30,14 +32,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT_DIR = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "20260601_225717"
 DEFAULT_PREPROCESSED_ROOT = EXPERIMENT_DIR / "query_niche_metrics" / "preprocessed"
-DEFAULT_MANIFEST = EXPERIMENT_DIR / "manifests" / "query_niche_manifest.csv"
+DEFAULT_NICHE_MANIFEST = EXPERIMENT_DIR / "manifests" / "query_niche_manifest.csv"
+DEFAULT_QUERY_MANIFEST = EXPERIMENT_DIR / "manifests" / "query_manifest.csv"
 DEFAULT_PARCELLATION_MEMBERSHIP = (
     REPO_ROOT
     / "data"
     / "ccf_parcellation"
     / "parcellation_to_parcellation_term_membership.csv"
 )
-MANIFEST_COLUMNS = [
+DEFAULT_EMBEDDING_TYPES = ("quest_gene_expr", "quest_scgpt", "scgpt", "gene_expr")
+NICHE_MANIFEST_COLUMNS = [
     "query_niche_id",
     "source_slice",
     "niche_name",
@@ -47,6 +51,14 @@ MANIFEST_COLUMNS = [
     "parcellations_in_niche",
     "parcellation_composition",
     "parcellation_names",
+]
+QUERY_MANIFEST_COLUMNS = [
+    "query_id",
+    "embedding_type",
+    "query_niche_id",
+    "source_slice",
+    "target_slice",
+    "niche_query_k",
 ]
 
 
@@ -78,7 +90,11 @@ def load_parcellation_names(path: Path) -> dict[int, str]:
         return {}
     frame = pd.read_csv(
         path,
-        usecols=["parcellation_index", "parcellation_term_set_name", "parcellation_term_name"],
+        usecols=[
+            "parcellation_index",
+            "parcellation_term_set_name",
+            "parcellation_term_name",
+        ],
     )
     structure_rows = frame[frame["parcellation_term_set_name"] == "structure"]
     if structure_rows.empty:
@@ -104,7 +120,9 @@ def load_preprocessed_slice(path: Path) -> dict[str, dict[str, str]]:
     except ValueError as exc:
         raise ValueError(f"{path}: missing required preprocessed column") from exc
     frame["center_cell_name"] = frame["center_cell_name"].str.strip()
-    duplicates = frame["center_cell_name"][frame["center_cell_name"].duplicated()].unique()
+    duplicates = frame["center_cell_name"][
+        frame["center_cell_name"].duplicated()
+    ].unique()
     if len(duplicates):
         raise ValueError(f"{path}: duplicate center(s): {', '.join(duplicates)}")
     return {
@@ -152,12 +170,14 @@ def composition_from_fractions(
 def matching_obs_columns(h5ad_path: Path, prefix: str) -> list[str]:
     adata = ad.read_h5ad(h5ad_path, backed="r")
     try:
-        return sorted(column for column in adata.obs.columns if column.startswith(prefix))
+        return sorted(
+            column for column in adata.obs.columns if column.startswith(prefix)
+        )
     finally:
         adata.file.close()
 
 
-def generate_rows(
+def generate_niche_rows(
     *,
     data_dir: Path,
     preprocessed_dir: Path,
@@ -208,10 +228,49 @@ def generate_rows(
     return rows
 
 
-def write_manifest(path: Path, rows: list[dict[str, str]]) -> None:
+def slice_ids(data_dir: Path) -> list[str]:
+    return sorted(path.stem for path in data_dir.glob("*.h5ad"))
+
+
+def generate_query_rows(
+    niche_rows: list[dict[str, str]],
+    *,
+    all_slice_ids: list[str],
+    embedding_types: tuple[str, ...],
+    niche_query_k: int,
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    query_id = 1
+    for niche_row in niche_rows:
+        source_slice = niche_row["source_slice"]
+        target_slices = [
+            target_slice
+            for target_slice in all_slice_ids
+            if target_slice != source_slice
+        ]
+        for embedding_type in embedding_types:
+            for target_slice in target_slices:
+                rows.append(
+                    {
+                        "query_id": str(query_id),
+                        "embedding_type": embedding_type,
+                        "query_niche_id": niche_row["query_niche_id"],
+                        "source_slice": source_slice,
+                        "target_slice": target_slice,
+                        "niche_query_k": str(niche_query_k),
+                    }
+                )
+                query_id += 1
+    return rows
+
+
+def write_manifest(
+    path: Path, rows: list[dict[str, str]], columns: list[str], *, quote_all: bool
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=MANIFEST_COLUMNS, quoting=csv.QUOTE_ALL)
+        quoting = csv.QUOTE_ALL if quote_all else csv.QUOTE_MINIMAL
+        writer = csv.DictWriter(handle, fieldnames=columns, quoting=quoting)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -222,7 +281,18 @@ def main() -> None:
     parser.add_argument("--composition-complexity", default="simple")
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--preprocessed-dir", type=Path)
-    parser.add_argument("--output", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--output", type=Path, default=DEFAULT_NICHE_MANIFEST)
+    parser.add_argument("--query-output", type=Path, default=DEFAULT_QUERY_MANIFEST)
+    parser.add_argument(
+        "--embedding-type",
+        dest="embedding_types",
+        action="append",
+        help=(
+            "Embedding type to include in query_manifest.csv. Repeat to override "
+            "the default order: quest_gene_expr, quest_scgpt, scgpt, gene_expr."
+        ),
+    )
+    parser.add_argument("--niche-query-k", type=int, default=3)
     parser.add_argument(
         "--parcellation-membership",
         type=Path,
@@ -236,16 +306,37 @@ def main() -> None:
         args.composition_complexity, label="--composition-complexity"
     )
     preprocessed_dir = args.preprocessed_dir or DEFAULT_PREPROCESSED_ROOT / niche_size
+    if args.niche_query_k <= 0:
+        parser.error("--niche-query-k must be positive")
+    embedding_types = tuple(args.embedding_types or DEFAULT_EMBEDDING_TYPES)
 
-    rows = generate_rows(
+    niche_rows = generate_niche_rows(
         data_dir=args.data_dir,
         preprocessed_dir=preprocessed_dir,
         niche_size=niche_size,
         composition_complexity=composition_complexity,
         parcellation_names=load_parcellation_names(args.parcellation_membership),
     )
-    write_manifest(args.output, rows)
-    print(f"Wrote {len(rows)} query niche manifest row(s) to {args.output}")
+    query_rows = generate_query_rows(
+        niche_rows,
+        all_slice_ids=slice_ids(args.data_dir),
+        embedding_types=embedding_types,
+        niche_query_k=args.niche_query_k,
+    )
+    write_manifest(
+        args.output,
+        niche_rows,
+        NICHE_MANIFEST_COLUMNS,
+        quote_all=True,
+    )
+    write_manifest(
+        args.query_output,
+        query_rows,
+        QUERY_MANIFEST_COLUMNS,
+        quote_all=False,
+    )
+    print(f"Wrote {len(niche_rows)} query niche manifest row(s) to {args.output}")
+    print(f"Wrote {len(query_rows)} query manifest row(s) to {args.query_output}")
 
 
 if __name__ == "__main__":
