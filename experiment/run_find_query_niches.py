@@ -480,6 +480,11 @@ def main() -> int:
         metrics_root=metrics_root,
         dim1=dim1,
     )
+    print(
+        f"processing {len(source_slices)} source slice(s): "
+        + ", ".join(source_slices),
+        flush=True,
+    )
     if args.exclude_slices:
         excluded = set(args.exclude_slices)
         skipped_source_slices = [
