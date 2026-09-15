@@ -210,7 +210,7 @@ def parse_args() -> argparse.Namespace:
         dest="exclude_slices",
         action="append",
         default=[],
-        help="Target slice CSV stem to exclude from prevalence comparisons. Repeatable.",
+        help="Source slice CSV stem to skip when generating query niches. Repeatable.",
     )
     return parser.parse_args()
 
@@ -352,8 +352,6 @@ def run_for_source_slice(
         "--output-file",
         str(final_candidates),
     ]
-    for excluded_slice in args.exclude_slices:
-        prevalence_command.extend(["--exclude-slice", excluded_slice])
     run_command(prevalence_command, root)
     run_command(
         [
@@ -408,7 +406,7 @@ def run_for_source_slice(
     print(f"selected_centers_csv: {selected_centers_csv}")
     print(f"selection_checks_json: {selection_checks_json}")
     if args.exclude_slices:
-        print(f"excluded target slices: {sorted(args.exclude_slices)}")
+        print(f"excluded source slices: {sorted(args.exclude_slices)}")
     if report_dirs:
         print("report directories:")
         for report_dir in report_dirs:

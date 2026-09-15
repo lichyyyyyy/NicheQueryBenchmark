@@ -11,8 +11,9 @@ are preserved). Output defaults to <input-stem>_prevalence.csv beside the input.
 Each retained center has target_slices (a JSON array of matching target slice
 IDs) and target_similar_niche_counts (a JSON map of slice ID to match count).
 These columns are recomputed if already present in the input. Every listed
-target has >=MIN_MATCHED_NICHES similar niches; the source slice is excluded. Candidates must
-qualify in at least REQUIRED_MATCHED_SLICE target slices. There is still one output row per center.
+target has >=MIN_MATCHED_NICHES similar niches; only the source slice is excluded
+from target comparisons. Candidates must qualify in at least REQUIRED_MATCHED_SLICE
+target slices. There is still one output row per center.
 The niche size is inferred from the input's <size>/<complexity>/,
 <size>_<complexity>/, or <size>/ directory; no dimension argument is needed.
 Comparison populations are ALL eligible exported niches in metrics-dir/dimension,
@@ -48,8 +49,8 @@ DEFAULT_METRICS_DIR = Path(__file__).resolve().parent / "query_niche_metrics"
 SOURCE_THRESHOLD = 0.05
 TARGET_THRESHOLD = 0.30
 REQUIRED_MATCHED_SLICE = 6
-MIN_MATCHED_NICHES = 300
-SOURCE_MIN_MATCHED_NICHES = 9
+MIN_MATCHED_NICHES = 30
+SOURCE_MIN_MATCHED_NICHES = 100
 
 
 def validated_ids(values):
@@ -266,9 +267,7 @@ def filter_niche_centers(
         )
         del population
         target_paths = [
-            path
-            for path in paths
-            if path.resolve() != source_path.resolve() and path.stem not in excluded
+            path for path in paths if path.resolve() != source_path.resolve()
         ]
         if excluded:
             excluded_available = sorted(
@@ -276,14 +275,16 @@ def filter_niche_centers(
                 for path in paths
                 if path.resolve() != source_path.resolve() and path.stem in excluded
             )
-            print(
-                f"Excluded {len(excluded_available)} target slice CSVs: "
-                + ", ".join(excluded_available),
-                flush=True,
+            message = (
+                "--exclude-slice is ignored during prevalence comparisons; "
+                f"including {len(excluded_available)} matching target slice CSVs"
             )
+            if excluded_available:
+                message += ": " + ", ".join(excluded_available)
+            print(message, flush=True)
         if len(target_paths) < REQUIRED_MATCHED_SLICE:
             print(
-                f"Only {len(target_paths)} other slice CSVs found; at least REQUIRED_MATCHED_SLICE are required.",
+                f"Only {len(target_paths)} other slice CSVs found; at least {REQUIRED_MATCHED_SLICE} are required.",
                 flush=True,
             )
         for path in target_paths:
@@ -364,7 +365,10 @@ if __name__ == "__main__":
         dest="exclude_slices",
         action="append",
         default=[],
-        help="Target slice CSV stem to exclude from prevalence comparisons. Repeatable.",
+        help=(
+            "Accepted for compatibility, but ignored: prevalence comparisons include "
+            "every non-source target slice."
+        ),
     )
     args = parser.parse_args()
     try:
