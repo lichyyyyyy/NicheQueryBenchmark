@@ -44,8 +44,10 @@ from typing import Any, Iterable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "20260601_225717"
-DEFAULT_QUERY_MANIFEST = Path(__file__).with_name("query_manifest.csv")
-DEFAULT_NICHE_MANIFEST = Path(__file__).with_name("query_niche_manifest.csv")
+DEFAULT_QUERY_MANIFEST = Path(__file__).with_name("manifests") / "query_manifest.csv"
+DEFAULT_NICHE_MANIFEST = (
+    Path(__file__).with_name("manifests") / "query_niche_manifest.csv"
+)
 DEFAULT_RAW_RESULTS_DIR = Path(__file__).with_name("raw_results")
 RM_IDEAL_MEMORY_CACHE_SIZE = 8
 RESULT_COLUMNS = (
@@ -722,11 +724,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--knn-backend",
-        choices=("auto", "exact", "hnsw"),
+        choices=("auto", "exact", "hnsw", "pyg_lib"),
         default="auto",
         help=(
-            "Neighbor-search backend. auto uses bounded-memory FAISS HNSW for "
-            "high-dimensional CPU embeddings and exact search otherwise."
+            "Neighbor-search backend. auto uses pyg-lib CUDA KNN when CUDA is "
+            "available, bounded-memory FAISS HNSW for high-dimensional CPU "
+            "embeddings, and exact search otherwise."
         ),
     )
     parser.add_argument(

@@ -60,6 +60,30 @@ def _faiss_hnsw_knn_graph(x: np.ndarray, k: int) -> torch.Tensor:
     return torch.stack([sources, targets], dim=0)
 
 
+def _sklearn_knn_graph(x: np.ndarray, k: int) -> torch.Tensor:
+    """Build an exact CPU KNN graph without torch_cluster."""
+    x = np.asarray(x, dtype=np.float32)
+    neighbors = NearestNeighbors(n_neighbors=min(k, x.shape[0]), algorithm="auto")
+    neighbors.fit(x)
+    neighbor_indices = neighbors.kneighbors(x, return_distance=False)
+
+    targets = torch.arange(x.shape[0], dtype=torch.long).repeat_interleave(
+        neighbor_indices.shape[1]
+    )
+    sources = torch.from_numpy(neighbor_indices.reshape(-1).astype(np.int64))
+    return torch.stack([sources, targets], dim=0)
+
+
+def _pyg_lib_knn_graph(x: torch.Tensor, k: int) -> torch.Tensor:
+    """Build a KNN graph with pyg-lib, preserving torch_cluster edge orientation."""
+    import pyg_lib.ops
+
+    edge_index = pyg_lib.ops.knn(x, x, k=k)
+    # pyg-lib returns [query, reference]; torch_cluster knn_graph returns
+    # [neighbor, query], which is what downstream adjacency construction expects.
+    return torch.stack([edge_index[1], edge_index[0]], dim=0)
+
+
 def _as_1d_float64(a: np.ndarray) -> np.ndarray:
     """1-D float64 vector for metrics / correlation (avoids (N,1) vs (N,) corrcoef issues)."""
     return np.asarray(a, dtype=np.float64).reshape(-1)
@@ -648,9 +672,22 @@ class NicheQuery:
             selected_backend = knn_backend
             if selected_backend == "auto":
                 selected_backend = (
-                    "hnsw" if device.type == "cpu" and X_np.shape[1] >= 128 else "exact"
+                    "pyg_lib"
+                    if device.type == "cuda"
+                    else "hnsw"
+                    if X_np.shape[1] >= 128
+                    else "exact"
                 )
-            if selected_backend == "hnsw":
+            if selected_backend == "pyg_lib":
+                if device.type != "cuda":
+                    raise ValueError("The pyg-lib KNN backend requires CUDA tensors")
+                logger.info(
+                    "[KNN] Using pyg-lib CUDA KNN for %d cells x %d features",
+                    X_np.shape[0],
+                    X_np.shape[1],
+                )
+                edge_index = _pyg_lib_knn_graph(X, self.k)
+            elif selected_backend == "hnsw":
                 if device.type != "cpu":
                     raise ValueError("The HNSW KNN backend only supports CPU tensors")
                 logger.info(
@@ -660,9 +697,20 @@ class NicheQuery:
                 )
                 edge_index = _faiss_hnsw_knn_graph(X_np, self.k)
             elif selected_backend == "exact":
-                edge_index = knn_graph(X, k=self.k, loop=True)
+                try:
+                    edge_index = knn_graph(X, k=self.k, loop=True)
+                except RuntimeError as exc:
+                    if device.type != "cpu" or "CUDA support" not in str(exc):
+                        raise
+                    logger.warning(
+                        "[KNN] torch_cluster exact KNN is unavailable in this "
+                        "CPU-only build; falling back to sklearn exact KNN"
+                    )
+                    edge_index = _sklearn_knn_graph(X_np, self.k)
             else:
-                raise ValueError("knn_backend must be one of {'auto', 'exact', 'hnsw'}")
+                raise ValueError(
+                    "knn_backend must be one of {'auto', 'exact', 'hnsw', 'pyg_lib'}"
+                )
 
             # (4) A_norm @ X  (row-normalized adjacency)
             N = X.size(0)
