@@ -44,12 +44,12 @@ except ImportError:  # pragma: no cover - exercised only in minimal envs.
 EXPERIMENT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EXPERIMENT_DIR.parent
 DEFAULT_SELECTION_DIR = (
-    EXPERIMENT_DIR / "query_niche_metrics/niche_visualizations/agent_proposed"
+    EXPERIMENT_DIR / "query_niche_metrics/selected_query_niches/agent_proposed"
 )
 DEFAULT_PREPROCESSED_DIR = EXPERIMENT_DIR / "query_niche_metrics/preprocessed"
 DEFAULT_DATA_DIR = REPO_ROOT / "data/20260601_225717"
 DEFAULT_OUTPUT_DIR = (
-    EXPERIMENT_DIR / "query_niche_metrics/niche_visualizations/agent_proposed"
+    EXPERIMENT_DIR / "query_niche_metrics/selected_query_niches/agent_proposed"
 )
 BACKGROUND_COLOR = "#d3d3d3"
 NICHE_COLOR = "#d62728"
@@ -556,7 +556,7 @@ def main() -> int:
         type=Path,
         help=(
             "Directory containing *_selected_centers.csv files. Default: "
-            "query_niche_metrics/niche_visualizations/agent_proposed/"
+            "query_niche_metrics/selected_query_niches/agent_proposed/"
             "<niche-size>/<composition-complexity>."
         ),
     )
@@ -574,7 +574,7 @@ def main() -> int:
         type=Path,
         help=(
             "Visualization output directory. Default: "
-            "query_niche_metrics/niche_visualizations/agent_proposed/"
+            "query_niche_metrics/selected_query_niches/agent_proposed/"
             "<niche-size>/<composition-complexity>/visualizations."
         ),
     )

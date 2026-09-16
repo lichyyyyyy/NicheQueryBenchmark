@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -107,25 +108,51 @@ def cell_overlap_fraction(first: Niche, second: Niche) -> float:
 def select(
     niches: list[Niche], k: int, *, max_cell_overlap_fraction: float = 0.0
 ) -> list[Niche]:
+    print(
+        f"precomputing pairwise compatibility for {len(niches)} candidates",
+        file=sys.stderr,
+        flush=True,
+    )
+    compatible_after: list[list[int]] = [[] for _ in niches]
+    for i, first in enumerate(niches):
+        if i and i % 250 == 0:
+            print(
+                f"  checked compatibility for {i}/{len(niches)} candidates",
+                file=sys.stderr,
+                flush=True,
+            )
+        for j in range(i + 1, len(niches)):
+            second = niches[j]
+            if first.parcellations & second.parcellations:
+                continue
+            if cell_overlap_fraction(first, second) <= max_cell_overlap_fraction:
+                compatible_after[i].append(j)
+    print("searching for compatible niche set", file=sys.stderr, flush=True)
+
     best: list[int] = []
 
-    def search(pos: int, chosen: list[int]) -> None:
+    def search(options: list[int], chosen: list[int]) -> bool:
         nonlocal best
         if len(chosen) > len(best):
             best = chosen.copy()
-        if len(chosen) == k or len(chosen) + len(niches) - pos <= len(best):
-            return
-        for index in range(pos, len(niches)):
-            candidate = niches[index]
-            if all(
-                cell_overlap_fraction(candidate, niches[j]) <= max_cell_overlap_fraction
-                for j in chosen
-            ):
-                chosen.append(index)
-                search(index + 1, chosen)
-                chosen.pop()
+        if len(chosen) == k:
+            return True
+        if len(chosen) + len(options) <= len(best):
+            return False
+        for option_pos, index in enumerate(options):
+            compatible = set(compatible_after[index])
+            next_options = [
+                value
+                for value in options[option_pos + 1 :]
+                if value in compatible
+            ]
+            chosen.append(index)
+            if search(next_options, chosen):
+                return True
+            chosen.pop()
+        return False
 
-    search(0, [])
+    search(list(range(len(niches))), [])
     return [niches[index] for index in best]
 
 

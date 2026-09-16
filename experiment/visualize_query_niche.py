@@ -8,7 +8,7 @@ Run from the repository root::
 
 Defaults match visualize_query_niche_v2.ipynb: large niches, spatial coordinates,
 and data/20260601_225717. Output is written to
-experiment/query_niche_metrics/niche_visualizations/<slice>_<cell>/large/.
+experiment/query_niche_metrics/selected_query_niches/<slice>_<cell>/large/.
 Use --all-niche-candidates-dir to set the directory of all niche candidates
 for one size (large, median, or small).
 Relative directory overrides are resolved against the repository root.
@@ -328,7 +328,7 @@ def visualize_query_niche(
         output_dir
         if output_dir is not None
         else PROJECT_ROOT
-        / "experiment/query_niche_metrics/niche_visualizations"
+        / "experiment/query_niche_metrics/selected_query_niches"
         / f"{SLICE_NAME}_{CENTER_CELL_NAME}"
         / NICHE_DIMENSION
     )

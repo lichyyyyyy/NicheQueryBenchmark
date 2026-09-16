@@ -22,7 +22,7 @@ k=3
 metrics_root=experiment/query_niche_metrics
 dimension_candidates="$metrics_root/filtered_query_niches_on_dimensions/$dim1/$dim2/${source_slice}.csv"
 final_candidates="$metrics_root/final_query_niche_candidates/$dim1/$dim2/${source_slice}.csv"
-report_root="$metrics_root/niche_visualizations/agent_proposed/$dim1/$dim2"
+report_root="$metrics_root/selected_query_niches/agent_proposed/$dim1/$dim2"
 selected_centers_csv="$report_root/${source_slice}_selected_centers.csv"
 selection_checks_json="$report_root/${source_slice}_selection_checks.json"
 ```
@@ -75,8 +75,8 @@ Always save `$selection_checks_json` and `$selected_centers_csv`, no matter whet
 Default selection artifact paths:
 
 ```text
-experiment/query_niche_metrics/niche_visualizations/agent_proposed/large/simple/C57BL6J-638850.28_selected_centers.csv
-experiment/query_niche_metrics/niche_visualizations/agent_proposed/large/simple/C57BL6J-638850.28_selection_checks.json
+experiment/query_niche_metrics/selected_query_niches/agent_proposed/large/simple/C57BL6J-638850.28_selected_centers.csv
+experiment/query_niche_metrics/selected_query_niches/agent_proposed/large/simple/C57BL6J-638850.28_selection_checks.json
 ```
 
 If `achieved_k` is less than `requested_k`, report the achieved count and shortfall. Never relax prevalence or overlap requirements silently.

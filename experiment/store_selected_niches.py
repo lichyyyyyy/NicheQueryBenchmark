@@ -3,7 +3,7 @@
 
 Reads selected centers from::
 
-    experiment/query_niche_metrics/niche_visualizations/agent_proposed/<niche-size>/<composition-complexity>
+    experiment/query_niche_metrics/selected_query_niches/agent_proposed/<niche-size>/<composition-complexity>
 
 and resolves each center against the corresponding preprocessed slice CSV in::
 
@@ -45,7 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SELECTION_DIR = (
     Path(__file__).resolve().parent
     / "query_niche_metrics"
-    / "niche_visualizations"
+    / "selected_query_niches"
     / "agent_proposed"
 )
 DEFAULT_PREPROCESSED_DIR = (
@@ -278,7 +278,7 @@ def main() -> None:
         type=Path,
         help=(
             "Directory containing *_selected_centers.csv files. Default: "
-            "query_niche_metrics/niche_visualizations/agent_proposed/"
+            "query_niche_metrics/selected_query_niches/agent_proposed/"
             "<niche-size>/<composition-complexity>."
         ),
     )

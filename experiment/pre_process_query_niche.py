@@ -2,9 +2,9 @@
 
 Run one slice from the repository root::
 
-    .venv/bin/python experiment/generate_query_niche_v2.py \
+    .venv/bin/python experiment/pre_process_query_niche.py \
         --h5ad-file data/20260601_225717/C57BL6J-638850.28.h5ad \
-        --output-dir experiment/query_niche_metrics/preprocess/large --k-hop 10 --niche-size large
+        --output-dir experiment/query_niche_metrics/preprocessed/large --k-hop 10 --niche-size large
 
 This writes ``experiment/query_niche_metrics/C57BL6J-638850.28.csv`` with one row per
 center cell whose niche reaches the target size. Omit ``--h5ad-file`` to process all H5AD files in the default data

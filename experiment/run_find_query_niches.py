@@ -64,10 +64,8 @@ def run_json_command(command: list[str], root: Path) -> dict:
         cwd=root,
         check=True,
         text=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
     )
-    if completed.stderr:
-        print(completed.stderr, end="", file=sys.stderr)
     try:
         payload = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
@@ -326,7 +324,7 @@ def run_for_source_slice(
         / f"{source_slice}.csv"
     )
     preprocessed_csv = metrics_root / "preprocessed" / dim1 / f"{source_slice}.csv"
-    report_root = metrics_root / "niche_visualizations/agent_proposed" / dim1 / dim2
+    report_root = metrics_root / "selected_query_niches/agent_proposed" / dim1 / dim2
     selected_centers_csv = report_root / f"{source_slice}_selected_centers.csv"
 
     require_file(
