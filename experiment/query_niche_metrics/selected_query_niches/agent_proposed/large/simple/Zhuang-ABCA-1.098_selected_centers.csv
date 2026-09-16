@@ -1,0 +1,4 @@
+source_slice,center_cell_name,niche_dimension,composition_complexity,niche_cell_count,parcellation_ids
+Zhuang-ABCA-1.098,157153644087789546198818426911474018971,large,simple,310,"[123, 207]"
+Zhuang-ABCA-1.098,196967620726170664296237597722398539190,large,simple,324,"[761, 921]"
+Zhuang-ABCA-1.098,303513299532941669618274008971545960845,large,simple,323,"[123, 303]"
