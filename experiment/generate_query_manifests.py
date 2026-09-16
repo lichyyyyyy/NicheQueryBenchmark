@@ -264,6 +264,73 @@ def generate_query_rows(
     return rows
 
 
+def read_existing_manifest(path: Path, columns: list[str]) -> list[dict[str, str]]:
+    if not path.is_file():
+        return []
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        missing = set(columns) - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"{path}: missing columns {sorted(missing)}")
+        return [{column: row.get(column, "") for column in columns} for row in reader]
+
+
+def merge_niche_rows(
+    existing_rows: list[dict[str, str]], new_rows: list[dict[str, str]]
+) -> tuple[list[dict[str, str]], int]:
+    seen = {row["query_niche_id"] for row in existing_rows}
+    merged = list(existing_rows)
+    skipped = 0
+    for row in new_rows:
+        query_niche_id = row["query_niche_id"]
+        if query_niche_id in seen:
+            skipped += 1
+            continue
+        seen.add(query_niche_id)
+        merged.append(row)
+    return merged, skipped
+
+
+def query_row_key(row: dict[str, str]) -> tuple[str, str, str, str, str]:
+    return (
+        row["embedding_type"],
+        row["query_niche_id"],
+        row["source_slice"],
+        row["target_slice"],
+        row["niche_query_k"],
+    )
+
+
+def merge_query_rows(
+    existing_rows: list[dict[str, str]], new_rows: list[dict[str, str]]
+) -> tuple[list[dict[str, str]], int]:
+    seen = {query_row_key(row) for row in existing_rows}
+    merged = list(existing_rows)
+    skipped = 0
+    next_query_id = 1
+    for row in existing_rows:
+        raw_query_id = row["query_id"]
+        if raw_query_id:
+            try:
+                next_query_id = max(next_query_id, int(raw_query_id) + 1)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid query_id in existing manifest: {raw_query_id}"
+                ) from exc
+
+    for row in new_rows:
+        key = query_row_key(row)
+        if key in seen:
+            skipped += 1
+            continue
+        seen.add(key)
+        new_row = dict(row)
+        new_row["query_id"] = str(next_query_id)
+        next_query_id += 1
+        merged.append(new_row)
+    return merged, skipped
+
+
 def write_manifest(
     path: Path, rows: list[dict[str, str]], columns: list[str], *, quote_all: bool
 ) -> None:
@@ -310,19 +377,31 @@ def main() -> None:
         parser.error("--niche-query-k must be positive")
     embedding_types = tuple(args.embedding_types or DEFAULT_EMBEDDING_TYPES)
 
-    niche_rows = generate_niche_rows(
+    generated_niche_rows = generate_niche_rows(
         data_dir=args.data_dir,
         preprocessed_dir=preprocessed_dir,
         niche_size=niche_size,
         composition_complexity=composition_complexity,
         parcellation_names=load_parcellation_names(args.parcellation_membership),
     )
-    query_rows = generate_query_rows(
-        niche_rows,
+    generated_query_rows = generate_query_rows(
+        generated_niche_rows,
         all_slice_ids=slice_ids(args.data_dir),
         embedding_types=embedding_types,
         niche_query_k=args.niche_query_k,
     )
+
+    existing_niche_rows = read_existing_manifest(args.output, NICHE_MANIFEST_COLUMNS)
+    existing_query_rows = read_existing_manifest(
+        args.query_output, QUERY_MANIFEST_COLUMNS
+    )
+    niche_rows, skipped_niche_rows = merge_niche_rows(
+        existing_niche_rows, generated_niche_rows
+    )
+    query_rows, skipped_query_rows = merge_query_rows(
+        existing_query_rows, generated_query_rows
+    )
+
     write_manifest(
         args.output,
         niche_rows,
@@ -336,7 +415,9 @@ def main() -> None:
         quote_all=False,
     )
     print(f"Wrote {len(niche_rows)} query niche manifest row(s) to {args.output}")
+    print(f"Skipped {skipped_niche_rows} duplicate query niche row(s)")
     print(f"Wrote {len(query_rows)} query manifest row(s) to {args.query_output}")
+    print(f"Skipped {skipped_query_rows} duplicate query row(s)")
 
 
 if __name__ == "__main__":
