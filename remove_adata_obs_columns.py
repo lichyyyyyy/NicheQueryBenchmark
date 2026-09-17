@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_H5AD_FOLDER = Path("data/20260601_225717")
 
-DEFAULT_KEEP_OBS_COLUMNS = ["sample_id"]
+DEFAULT_KEEP_OBS_COLUMNS = ["sample_id", "parcellation_index"]
 
 DEFAULT_OBSM_KEYS = [
     "X_quest_emb",
@@ -117,8 +117,10 @@ def clean_h5ad(
             "[SKIP] %s: none of the requested AnnData entries were present", h5ad_path
         )
     else:
+        status = "[DONE]" if write else "[DRY-RUN]"
         logger.info(
-            "[DONE] %s: obs_removed=%s obsm_removed=%s obsm_renamed=%s layers_removed=%s",
+            "%s %s: obs_removed=%s obsm_removed=%s obsm_renamed=%s layers_removed=%s",
+            status,
             h5ad_path,
             obs_columns_to_remove,
             obsm_keys_to_remove,

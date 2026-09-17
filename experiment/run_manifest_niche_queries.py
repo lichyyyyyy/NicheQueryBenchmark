@@ -531,7 +531,7 @@ def run_one_query(
     import anndata as ad
     import numpy as np
 
-    from src.NicheQueryPrototype.database import Database
+    from src.NicheQueryPrototype.database import Database, FeatureDataUnavailableError
     from src.NicheQueryPrototype.query import NicheQuery
 
     source_path = data_dir / f"{row.source_slice}.h5ad"
@@ -568,14 +568,18 @@ def run_one_query(
     # Build a row-local database using either adata.X (gene_expr) or the mapped
     # embedding matrix in adata.obsm (QueST/scGPT).
     db = Database(target_sample_ids=list(sample_adatas))
-    db.construct_from_sample_adatas(
-        sample_adatas=sample_adatas,
-        feature_name=feature_name,
-        parcellation_obs_key="parcellation_index",
-        parcellation_write_obs_key="parcellation_index",
-        spatial_obsm_key="spatial",
-        preserve_input_adata=True,
-    )
+    try:
+        db.construct_from_sample_adatas(
+            sample_adatas=sample_adatas,
+            feature_name=feature_name,
+            parcellation_obs_key="parcellation_index",
+            parcellation_write_obs_key="parcellation_index",
+            spatial_obsm_key="spatial",
+            preserve_input_adata=True,
+        )
+    except FeatureDataUnavailableError as exc:
+        logger.warning("[SKIP] query_id=%d: %s", row.query_id, exc)
+        return False
 
     niche, source_dirty = get_or_construct_niche(db, metadata)
     db_target = db.get_sample(row.target_slice)

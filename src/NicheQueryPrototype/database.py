@@ -25,6 +25,15 @@ logger = logging.getLogger(__name__)
 
 # Chunk size for filtering large CSVs when ``target_sample_ids`` is set.
 _METADATA_CSV_CHUNKSIZE = 500_000
+GENE_EXPRESSION_FEATURE_NAMES = {"gene_expression", "gene_expr"}
+
+
+class FeatureDataUnavailableError(ValueError):
+    """Raised when a requested feature source is absent from an input AnnData."""
+
+
+def _is_gene_expression_feature(feature_name: str) -> bool:
+    return feature_name in GENE_EXPRESSION_FEATURE_NAMES
 
 
 class Cell:
@@ -333,7 +342,7 @@ class Database:
     """
     Loads and construct the database.
     
-    `feature_name`: 'gene_expression' or the name of embeddings in adata.obsm.
+    `feature_name`: 'gene_expression' / 'gene_expr' or the name of embeddings in adata.obsm.
     """
 
     def construct(
@@ -454,7 +463,7 @@ class Database:
                 len(rm_ideal_score_by_cell),
             )
 
-        if feature_name == "gene_expression" and adata_list:
+        if _is_gene_expression_feature(feature_name) and adata_list:
             name_sets = [set(ad.var_names.astype(str)) for ad in adata_list]
             common_genes = sorted(set.intersection(*name_sets))
             if not common_genes:
@@ -485,7 +494,7 @@ class Database:
                 sample_id=sample_id,
             )
             cell.X = self.get_cell_expression(adata_list, cell_id)
-            if feature_name == "gene_expression":
+            if _is_gene_expression_feature(feature_name):
                 cell.feature = cell.X
             else:
                 cell.feature = self.get_cell_embedding(
@@ -521,7 +530,7 @@ class Database:
                 len(self.samples),
             )
 
-        if feature_name != "gene_expression":
+        if not _is_gene_expression_feature(feature_name):
             feat_dims: set = set()
             for c in self.cells:
                 if c.feature is not None:
@@ -591,7 +600,7 @@ class Database:
 
             sample.construct_adata(
                 var=sample_var,
-                require_features=(feature_name != "gene_expression"),
+                require_features=(not _is_gene_expression_feature(feature_name)),
                 rm_ideal_output_key=rm_ideal_output_key,
             )
             if _verbose:
@@ -682,7 +691,8 @@ class Database:
         - coordinates in ``adata.obsm[spatial_obsm_key]`` (uses first two columns as x,y)
         - parcellation id in ``adata.obs[parcellation_obs_key]`` (int-like)
         - sample id inferred from the dict key / ``adata.uns["library_id"]`` / ``adata.obs["sample_id"]``
-        - features from either ``adata.X`` (when ``feature_name == "gene_expression"``) or
+        - features from either ``adata.X`` (when ``feature_name == "gene_expression"``
+          or ``"gene_expr"``) or
           ``adata.obsm[feature_name]`` (embedding)
 
         Parameters
@@ -691,7 +701,8 @@ class Database:
             Either a list of AnnData (sample_id is inferred) or a dict mapping
             explicit ``sample_id -> AnnData``.
         feature_name
-            ``"gene_expression"`` to use ``adata.X``; otherwise uses ``adata.obsm[feature_name]``.
+            ``"gene_expression"`` or ``"gene_expr"`` to use ``adata.X``; otherwise
+            uses ``adata.obsm[feature_name]``.
         parcellation_path
             Optional CCF structure JSON. When provided, fills ``cell.parcellation_info``.
         parcellation_obs_key
@@ -744,7 +755,14 @@ class Database:
             raise ValueError("sample_adatas is empty; nothing to construct.")
 
         # If gene expression, align genes across samples (intersection) like construct(...).
-        if feature_name == "gene_expression":
+        if _is_gene_expression_feature(feature_name):
+            missing_x = [sid for sid, ad in items if ad.X is None]
+            if missing_x:
+                raise FeatureDataUnavailableError(
+                    "Gene-expression features were requested, but these AnnData "
+                    f"object(s) have X=None: {missing_x}. Use an h5ad with raw "
+                    "expression in .X or skip/remap the gene_expr embedding type."
+                )
             name_sets = [set(ad.var_names.astype(str)) for _, ad in items]
             common_genes = sorted(set.intersection(*name_sets))
             if not common_genes:
@@ -921,7 +939,7 @@ class Database:
                     sample_id=sample_id,
                 )
 
-                if feature_name == "gene_expression":
+                if _is_gene_expression_feature(feature_name):
                     cell.X = self._row_to_1d_numpy(adata[i, :].X)
                     cell.feature = cell.X
                 else:
@@ -954,7 +972,7 @@ class Database:
         if meta_rows:
             self.merged_cell_metadata = pd.DataFrame(meta_rows)
 
-        if feature_name != "gene_expression":
+        if not _is_gene_expression_feature(feature_name):
             feat_dims: set = set()
             for c in self.cells:
                 if c.feature is not None:
@@ -970,7 +988,7 @@ class Database:
             # Build AnnData per sample (aligned with Sample.cells).
             logger.info("Constructing AnnData for each sample...")
             var: pd.DataFrame
-            if feature_name == "gene_expression":
+            if _is_gene_expression_feature(feature_name):
                 # All items already subset to common genes; any sample's var is fine.
                 var = items[0][1].var.copy(deep=False)
             else:
@@ -984,7 +1002,7 @@ class Database:
             for sample in self.samples.values():
                 sample.construct_adata(
                     var=var,
-                    require_features=(feature_name != "gene_expression"),
+                    require_features=(not _is_gene_expression_feature(feature_name)),
                     rm_ideal_output_key=rm_ideal_output_key,
                 )
 

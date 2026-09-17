@@ -90,7 +90,24 @@ class Niche:
 
     def compute_niche_feature(self):
         assert len(self.cells) > 0, "Empty cells in the niche"
-        cell_features = np.array([c.feature.squeeze() for c in self.cells])
+        missing = [c.id for c in self.cells if c.feature is None]
+        if missing:
+            preview = ", ".join(map(str, missing[:5]))
+            suffix = "..." if len(missing) > 5 else ""
+            raise ValueError(
+                f"Niche for sample {self.sample_id!r} has {len(missing)}/"
+                f"{len(self.cells)} cells without feature vectors. "
+                f"First missing cell id(s): {preview}{suffix}"
+            )
+        try:
+            cell_features = np.asarray(
+                [np.asarray(c.feature).squeeze() for c in self.cells], dtype=float
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Niche for sample {self.sample_id!r} contains non-numeric "
+                "feature vectors; cannot compute mean niche feature."
+            ) from exc
         self.feature = cell_features.mean(axis=0)
 
     """
