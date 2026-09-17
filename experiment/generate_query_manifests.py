@@ -8,7 +8,7 @@ The generator scans source slice H5AD files for obs columns named like::
 Each matching obs column becomes one row in ``query_niche_manifest.csv`` with
 the obs column name as ``query_niche_id``. Niche size, k-hop, parcellation IDs,
 and parcellation composition are resolved from the corresponding preprocessed
-CSV row in ``query_niche_metrics/preprocessed/<niche-size>/<source_slice>.csv``.
+CSV row in ``query_niches/preprocessed/<niche-size>/<source_slice>.csv``.
 The script also writes ``query_manifest.csv`` with one row for each query niche,
 embedding type, and non-source target slice.
 
@@ -31,7 +31,7 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT_DIR = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "20260601_225717"
-DEFAULT_PREPROCESSED_ROOT = EXPERIMENT_DIR / "query_niche_metrics" / "preprocessed"
+DEFAULT_PREPROCESSED_ROOT = EXPERIMENT_DIR / "query_niches" / "preprocessed"
 DEFAULT_NICHE_MANIFEST = EXPERIMENT_DIR / "manifests" / "query_niche_manifest.csv"
 DEFAULT_QUERY_MANIFEST = EXPERIMENT_DIR / "manifests" / "query_manifest.csv"
 DEFAULT_PARCELLATION_MEMBERSHIP = (

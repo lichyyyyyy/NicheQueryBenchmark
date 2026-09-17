@@ -4,11 +4,11 @@ Run from the repository root::
 
     .venv/bin/python experiment/visualize_query_niche.py \
         --source-slice C57BL6J-638850.28 --cell-id 1019171910101420741
-        --all-niche-candidates-dir experiment/query_niche_metrics/large
+        --all-niche-candidates-dir experiment/query_niches/large
 
 Defaults match visualize_query_niche_v2.ipynb: large niches, spatial coordinates,
 and data/20260601_225717. Output is written to
-experiment/query_niche_metrics/selected_query_niches/<slice>_<cell>/large/.
+experiment/query_niches/selected_query_niches/<slice>_<cell>/large/.
 Use --all-niche-candidates-dir to set the directory of all niche candidates
 for one size (large, median, or small).
 Relative directory overrides are resolved against the repository root.
@@ -45,7 +45,7 @@ else:
     from query_niche_dimensions import QUERY_NICHE_DIMENSIONS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_ALL_NICHE_CANDIDATES_DIR = PROJECT_ROOT / "experiment/query_niche_metrics/large"
+DEFAULT_ALL_NICHE_CANDIDATES_DIR = PROJECT_ROOT / "experiment/query_niches/large"
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data/20260601_225717"
 SOURCE_COMPOSITION_FRACTION_THRESHOLD = 0.05
 TARGET_COMPOSITION_FRACTION_THRESHOLD = 0.25
@@ -328,7 +328,7 @@ def visualize_query_niche(
         output_dir
         if output_dir is not None
         else PROJECT_ROOT
-        / "experiment/query_niche_metrics/selected_query_niches"
+        / "experiment/query_niches/selected_query_niches"
         / f"{SLICE_NAME}_{CENTER_CELL_NAME}"
         / NICHE_DIMENSION
     )

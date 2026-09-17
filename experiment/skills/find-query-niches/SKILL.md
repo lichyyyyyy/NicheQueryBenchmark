@@ -19,7 +19,7 @@ source_slice=C57BL6J-638850.28
 dim1=large
 dim2=simple
 k=3
-metrics_root=experiment/query_niche_metrics
+metrics_root=experiment/query_niches
 dimension_candidates="$metrics_root/filtered_query_niches_on_dimensions/$dim1/$dim2/${source_slice}.csv"
 final_candidates="$metrics_root/final_query_niche_candidates/$dim1/$dim2/${source_slice}.csv"
 report_root="$metrics_root/selected_query_niches/agent_proposed/$dim1/$dim2"
@@ -64,7 +64,7 @@ Use `experiment/select_non_overlapping_niches.py` for selection:
 ```bash
 .venv/bin/python experiment/select_non_overlapping_niches.py -k "$k" \
   --candidates "$final_candidates" \
-  --preprocessed "experiment/query_niche_metrics/preprocessed/$dim1/${source_slice}.csv" \
+  --preprocessed "experiment/query_niches/preprocessed/$dim1/${source_slice}.csv" \
   --output "$selection_checks_json"
 ```
 
@@ -75,8 +75,8 @@ Always save `$selection_checks_json` and `$selected_centers_csv`, no matter whet
 Default selection artifact paths:
 
 ```text
-experiment/query_niche_metrics/selected_query_niches/agent_proposed/large/simple/C57BL6J-638850.28_selected_centers.csv
-experiment/query_niche_metrics/selected_query_niches/agent_proposed/large/simple/C57BL6J-638850.28_selection_checks.json
+experiment/query_niches/selected_query_niches/agent_proposed/large/simple/C57BL6J-638850.28_selected_centers.csv
+experiment/query_niches/selected_query_niches/agent_proposed/large/simple/C57BL6J-638850.28_selection_checks.json
 ```
 
 If `achieved_k` is less than `requested_k`, report the achieved count and shortfall. Never relax prevalence or overlap requirements silently.

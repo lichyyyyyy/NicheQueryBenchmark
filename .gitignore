@@ -4,9 +4,9 @@ notebook/*/data
 .vscode/
 experiment/__pycache__/
 experiment/raw_results/
-experiment/query_niche_metrics
-!experiment/query_niche_metrics/selected_query_niches/
-!experiment/query_niche_metrics/selected_query_niches/**
+experiment/query_niches
+!experiment/query_niches/selected_query_niches/
+!experiment/query_niches/selected_query_niches/**
 *.pyc
 __pycache__/
 .ruff_cache/

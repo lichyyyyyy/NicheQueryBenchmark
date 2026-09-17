@@ -4,8 +4,8 @@
 Example::
 
     .venv/bin/python experiment/select_non_overlapping_niches.py -k 3 \
-        --candidates experiment/query_niche_metrics/final_query_niche_candidates/large/simple/C57BL6J-638850.28.csv \
-        --preprocessed experiment/query_niche_metrics/preprocessed/large/C57BL6J-638850.28.csv
+        --candidates experiment/query_niches/final_query_niche_candidates/large/simple/C57BL6J-638850.28.csv \
+        --preprocessed experiment/query_niches/preprocessed/large/C57BL6J-638850.28.csv
 
 Two niches are compatible only when their member-cell overlap is at most
 ``--max-cell-overlap-percent`` of the smaller niche. Candidate CSV order is

@@ -10,18 +10,18 @@ Normalized enrichment at the top 0.5%, 1%, 5%, and 200 cells compares the
 above-baseline mean RM-Ideal relevance of the true and predicted top-K sets.
 Recall at the same cutoffs measures the fraction of the RM-Ideal top-K set
 retrieved by the predicted top-K set.
-Per-query metrics are also aggregated by embedding type. Pearson and Spearman
-use a Fisher-z mean; ranking metrics use an arithmetic mean.
+Aggregation is handled separately by
+``aggregate_niche_query_metrics.py``.
 
 Example
 -------
 Run the analysis with the default paths::
 
-    python experiment/analyze_evaluation.py
+    python experiment/process_niche_query_raw_results.py
 
 Use custom input/output locations::
 
-    python experiment/analyze_evaluation.py \
+    python experiment/process_niche_query_raw_results.py \
         --query-manifest path/to/query_manifest.csv \
         --raw-results-dir path/to/raw_results \
         --output path/to/evaluation_metrics_per_query.csv
@@ -46,9 +46,6 @@ DEFAULT_RAW_RESULTS_DIR = EXPERIMENT_DIR / "raw_results"
 DEFAULT_OUTPUT = (
     EXPERIMENT_DIR / "evaluation_results" / "evaluation_metrics_per_query.csv"
 )
-DEFAULT_AGGREGATE_OUTPUT = (
-    EXPERIMENT_DIR / "evaluation_results" / "evaluation_metrics_by_embedding_type.csv"
-)
 OUTPUT_COLUMNS = (
     "query_id",
     "pearson",
@@ -65,13 +62,6 @@ OUTPUT_COLUMNS = (
     "recall_at_1pct",
     "recall_at_5pct",
     "recall_at_top_200",
-)
-AGGREGATE_OUTPUT_COLUMNS = ("embedding_type", *OUTPUT_COLUMNS[1:])
-PAIRING_COLUMNS = (
-    "query_niche_id",
-    "source_slice",
-    "target_slice",
-    "niche_query_k",
 )
 SCORE_COLUMNS = ("query_id", "niche_query_score", "rm_ideal_score")
 
@@ -109,6 +99,61 @@ def load_query_ids(path: Path) -> list[int]:
     if not query_ids:
         raise ValueError(f"Query manifest has no data rows: {path}")
     return query_ids
+
+
+def load_existing_metrics(path: Path) -> dict[int, dict[str, int | float]]:
+    """Load reusable per-query metric rows from an existing output file.
+
+    Rows with the current schema and numeric metric values are returned.  An
+    old or incomplete output file is treated as having no reusable rows so the
+    missing metrics can be recomputed normally.
+    """
+    if not path.is_file():
+        return {}
+
+    reusable: dict[int, dict[str, int | float]] = {}
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            missing = set(OUTPUT_COLUMNS) - set(reader.fieldnames or [])
+            if missing:
+                logger.warning(
+                    "Existing metrics file %s has an old/incomplete schema; "
+                    "recomputing affected queries",
+                    path,
+                )
+                return {}
+
+            for line_number, raw in enumerate(reader, start=2):
+                try:
+                    query_id = int((raw.get("query_id") or "").strip())
+                    if query_id <= 0:
+                        raise ValueError("query_id must be positive")
+                    parsed: dict[str, int | float] = {"query_id": query_id}
+                    for column in OUTPUT_COLUMNS[1:]:
+                        parsed[column] = float(raw[column])
+                except (TypeError, ValueError) as exc:
+                    logger.warning(
+                        "Ignoring invalid existing metric row %s:%d: %s",
+                        path,
+                        line_number,
+                        exc,
+                    )
+                    continue
+                if query_id in reusable:
+                    raise ValueError(
+                        f"Duplicate query_id={query_id} in existing metrics {path}"
+                    )
+                reusable[query_id] = parsed
+    except csv.Error as exc:
+        logger.warning(
+            "Could not read existing metrics file %s; recomputing queries: %s",
+            path,
+            exc,
+        )
+        return {}
+
+    return reusable
 
 
 def load_score_pairs(
@@ -278,131 +323,6 @@ def recall_metrics(
     }
 
 
-def _fisher_mean(values: list[float]) -> float:
-    """Average correlations in Fisher-z space and transform back."""
-    correlations = np.asarray(values, dtype=np.float64)
-    if correlations.size == 0:
-        return float("nan")
-    if np.any((correlations < -1.0) | (correlations > 1.0)):
-        raise ValueError("Correlation values must lie in [-1, 1]")
-    # Exact +/-1 maps to infinity. Clipping to the nearest interior floats keeps
-    # the Fisher transform finite while preserving the limiting behavior.
-    correlations = np.clip(
-        correlations,
-        np.nextafter(-1.0, 0.0),
-        np.nextafter(1.0, 0.0),
-    )
-    return float(np.tanh(np.mean(np.arctanh(correlations))))
-
-
-def aggregate_metrics_by_embedding_type(
-    rows: list[dict[str, int | float]], query_manifest_path: Path
-) -> list[dict[str, str | float]]:
-    """Aggregate paired per-query metrics by manifest ``embedding_type``.
-
-    Pearson and Spearman use a Fisher-z mean. NDCG, recall, and normalized
-    enrichment metrics use an arithmetic mean. The function also verifies that
-    every embedding type covers the same paired query configurations. Queries
-    whose source and target slices are identical are excluded from aggregation.
-    """
-    required_columns = {"query_id", "embedding_type", *PAIRING_COLUMNS}
-    metadata: dict[int, tuple[str, tuple[str, ...]]] = {}
-    manifest_query_ids: set[int] = set()
-    excluded_query_ids: set[int] = set()
-    embedding_order: list[str] = []
-    paired_keys: dict[str, set[tuple[str, ...]]] = {}
-    with query_manifest_path.open(newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle)
-        missing = required_columns - set(reader.fieldnames or [])
-        if missing:
-            raise ValueError(
-                f"{query_manifest_path} is missing columns: {sorted(missing)}"
-            )
-        for line_number, row in enumerate(reader, start=2):
-            try:
-                query_id = int(row["query_id"])
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"{query_manifest_path}:{line_number}: invalid query_id"
-                ) from exc
-            embedding_type = (row["embedding_type"] or "").strip()
-            if not embedding_type:
-                raise ValueError(
-                    f"{query_manifest_path}:{line_number}: empty embedding_type"
-                )
-            pair_key = tuple((row[column] or "").strip() for column in PAIRING_COLUMNS)
-            if query_id in manifest_query_ids:
-                raise ValueError(
-                    f"{query_manifest_path}:{line_number}: duplicate query_id {query_id}"
-                )
-            manifest_query_ids.add(query_id)
-            source_slice = (row["source_slice"] or "").strip()
-            target_slice = (row["target_slice"] or "").strip()
-            if source_slice == target_slice:
-                excluded_query_ids.add(query_id)
-                continue
-            if embedding_type not in paired_keys:
-                embedding_order.append(embedding_type)
-                paired_keys[embedding_type] = set()
-            if pair_key in paired_keys[embedding_type]:
-                raise ValueError(
-                    f"{query_manifest_path}:{line_number}: duplicate paired query "
-                    f"configuration for embedding_type={embedding_type!r}"
-                )
-            paired_keys[embedding_type].add(pair_key)
-            metadata[query_id] = (embedding_type, pair_key)
-
-    if not embedding_order:
-        raise ValueError(f"Query manifest has no data rows: {query_manifest_path}")
-    reference_embedding = embedding_order[0]
-    reference_pairs = paired_keys[reference_embedding]
-    for embedding_type in embedding_order[1:]:
-        if paired_keys[embedding_type] != reference_pairs:
-            raise ValueError(
-                "Embedding types do not cover identical paired query configurations: "
-                f"{reference_embedding!r} has {len(reference_pairs)}, "
-                f"{embedding_type!r} has {len(paired_keys[embedding_type])}"
-            )
-
-    rows_by_embedding: dict[str, list[dict[str, int | float]]] = {
-        embedding_type: [] for embedding_type in embedding_order
-    }
-    seen_query_ids: set[int] = set()
-    for row in rows:
-        query_id = int(row["query_id"])
-        if query_id not in manifest_query_ids:
-            raise KeyError(
-                f"query_id={query_id} does not exist in {query_manifest_path}"
-            )
-        if query_id in seen_query_ids:
-            raise ValueError(f"Duplicate evaluation row for query_id={query_id}")
-        seen_query_ids.add(query_id)
-        if query_id in excluded_query_ids:
-            continue
-        embedding_type = metadata[query_id][0]
-        rows_by_embedding[embedding_type].append(row)
-
-    missing_query_ids = set(metadata) - seen_query_ids
-    if missing_query_ids:
-        raise ValueError(
-            f"Evaluation results are missing {len(missing_query_ids)} manifest queries"
-        )
-
-    aggregated: list[dict[str, str | float]] = []
-    arithmetic_columns = OUTPUT_COLUMNS[3:]
-    for embedding_type in embedding_order:
-        group = rows_by_embedding[embedding_type]
-        result: dict[str, str | float] = {
-            "embedding_type": embedding_type,
-            "pearson": _fisher_mean([float(row["pearson"]) for row in group]),
-            "spearman": _fisher_mean([float(row["spearman"]) for row in group]),
-        }
-        for column in arithmetic_columns:
-            result[column] = float(np.mean([float(row[column]) for row in group]))
-        aggregated.append(result)
-    return aggregated
-
-
 def write_metrics(
     rows: list[dict[str, object]], output_path: Path, columns: tuple[str, ...]
 ) -> None:
@@ -449,12 +369,6 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_OUTPUT,
         help=f"Output metric CSV (default: {DEFAULT_OUTPUT})",
     )
-    parser.add_argument(
-        "--aggregate-output",
-        type=Path,
-        default=DEFAULT_AGGREGATE_OUTPUT,
-        help=f"Embedding-type aggregate CSV (default: {DEFAULT_AGGREGATE_OUTPUT})",
-    )
     return parser.parse_args()
 
 
@@ -463,9 +377,22 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     query_ids = load_query_ids(args.query_manifest.resolve())
+    output_path = args.output.resolve()
+    existing_metrics = load_existing_metrics(output_path)
     raw_results_dir = args.raw_results_dir.resolve()
     rows: list[dict[str, int | float]] = []
     for position, query_id in enumerate(query_ids, start=1):
+        if query_id in existing_metrics:
+            rows.append(existing_metrics[query_id])
+            logger.info(
+                "[%d/%d] query_id=%d reused metrics from %s",
+                position,
+                len(query_ids),
+                query_id,
+                output_path,
+            )
+            continue
+
         result_path = raw_results_dir / f"query_{query_id}.csv"
         niche_scores, rm_ideal_scores = load_score_pairs(result_path, query_id)
         pearson, spearman = correlations(niche_scores, rm_ideal_scores)
@@ -495,24 +422,8 @@ def main() -> None:
             ndcg["ndcg_at_top_200"],
         )
 
-    output_path = args.output.resolve()
     write_metrics(rows, output_path, OUTPUT_COLUMNS)
     logger.info("Wrote %d query metric rows to %s", len(rows), output_path)
-
-    aggregate_rows = aggregate_metrics_by_embedding_type(
-        rows, args.query_manifest.resolve()
-    )
-    aggregate_output_path = args.aggregate_output.resolve()
-    write_metrics(
-        aggregate_rows,
-        aggregate_output_path,
-        AGGREGATE_OUTPUT_COLUMNS,
-    )
-    logger.info(
-        "Wrote %d embedding-type aggregate rows to %s",
-        len(aggregate_rows),
-        aggregate_output_path,
-    )
 
 
 if __name__ == "__main__":

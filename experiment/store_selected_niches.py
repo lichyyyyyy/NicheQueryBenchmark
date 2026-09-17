@@ -3,11 +3,11 @@
 
 Reads selected centers from::
 
-    experiment/query_niche_metrics/selected_query_niches/agent_proposed/<niche-size>/<composition-complexity>
+    experiment/query_niches/selected_query_niches/agent_proposed/<niche-size>/<composition-complexity>
 
 and resolves each center against the corresponding preprocessed slice CSV in::
 
-    experiment/query_niche_metrics/preprocessed/<niche-size>
+    experiment/query_niches/preprocessed/<niche-size>
 
 For every selected center, this writes a binary membership mask to the source
 slice H5AD as ``adata.obs["<niche-size>_<composition-complexity>_niche_{center_cell_id}"]``. Cells in the
@@ -44,12 +44,12 @@ csv.field_size_limit(100_000_000)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SELECTION_DIR = (
     Path(__file__).resolve().parent
-    / "query_niche_metrics"
+    / "query_niches"
     / "selected_query_niches"
     / "agent_proposed"
 )
 DEFAULT_PREPROCESSED_DIR = (
-    Path(__file__).resolve().parent / "query_niche_metrics" / "preprocessed"
+    Path(__file__).resolve().parent / "query_niches" / "preprocessed"
 )
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "20260601_225717"
 
@@ -278,7 +278,7 @@ def main() -> None:
         type=Path,
         help=(
             "Directory containing *_selected_centers.csv files. Default: "
-            "query_niche_metrics/selected_query_niches/agent_proposed/"
+            "query_niches/selected_query_niches/agent_proposed/"
             "<niche-size>/<composition-complexity>."
         ),
     )
@@ -287,7 +287,7 @@ def main() -> None:
         type=Path,
         help=(
             "Directory containing preprocessed <slice>.csv files. Default: "
-            "query_niche_metrics/preprocessed/<niche-size>."
+            "query_niches/preprocessed/<niche-size>."
         ),
     )
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)

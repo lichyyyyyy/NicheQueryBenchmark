@@ -204,7 +204,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--metrics-root",
         type=Path,
-        default=Path("experiment/query_niche_metrics"),
+        default=Path("experiment/query_niches"),
     )
     parser.add_argument("--python", type=Path, help="Python executable to use")
     parser.add_argument(

@@ -5,7 +5,7 @@ Run from the repository root::
     .venv/bin/python experiment/filter_query_niches.py \
         --source-slice C57BL6J-638850.28 --dimension large simple
 
-Reads ``query_niche_metrics/large/<source-slice>.csv`` and writes a one-column
+Reads ``query_niches/large/<source-slice>.csv`` and writes a one-column
 CSV of matching center_cell_name values under
 ``filtered_query_niches/large/simple/<source-slice>.csv``. All paths default to
 directories beside this script. Override with --metrics-dir and --output-file.
@@ -36,9 +36,9 @@ if __package__:
 else:
     from query_niche_dimensions import COMPOSITION_COMPLEXITY, QUERY_NICHE_DIMENSIONS
 
-DEFAULT_METRICS_DIR = Path(__file__).resolve().parent / "query_niche_metrics"
+DEFAULT_METRICS_DIR = Path(__file__).resolve().parent / "query_niches"
 DEFAULT_OUTPUT_DIR = (
-    Path(__file__).resolve().parent / "query_niche_metrics/filtered_query_niches"
+    Path(__file__).resolve().parent / "query_niches/filtered_query_niches"
 )
 
 

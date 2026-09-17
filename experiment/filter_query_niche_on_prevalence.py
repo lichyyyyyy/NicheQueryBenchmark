@@ -3,7 +3,7 @@ r"""Keep candidates with >SOURCE_MIN_MATCHED_NICHES source matches and >=MIN_MAT
 Example (run from the repository root)::
 
     .venv/bin/python experiment/filter_query_niche_on_prevalence.py \
-        --input-file experiment/query_niche_metrics/filtered_query_niches/large/simple/C57BL6J-638850.28.csv \
+        --input-file experiment/query_niches/filtered_query_niches/large/simple/C57BL6J-638850.28.csv \
         --source-slice C57BL6J-638850.28
 
 Input is an upstream candidate CSV containing center_cell_name (extra columns
@@ -45,7 +45,7 @@ if __package__:
 else:
     from query_niche_dimensions import COMPOSITION_COMPLEXITY, QUERY_NICHE_DIMENSIONS
 
-DEFAULT_METRICS_DIR = Path(__file__).resolve().parent / "query_niche_metrics"
+DEFAULT_METRICS_DIR = Path(__file__).resolve().parent / "query_niches"
 SOURCE_THRESHOLD = 0.05
 TARGET_THRESHOLD = 0.25
 REQUIRED_MATCHED_SLICE = 6

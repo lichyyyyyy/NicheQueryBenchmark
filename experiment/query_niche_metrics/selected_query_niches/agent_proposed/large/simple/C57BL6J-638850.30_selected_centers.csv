@@ -1,5 +1,0 @@
-source_slice,center_cell_name,niche_dimension,composition_complexity,niche_cell_count,parcellation_ids
-C57BL6J-638850.30,1018093344101400431-5,large,simple,333,"[123, 207]"
-C57BL6J-638850.30,1018093344101090631-2,large,simple,325,[371]
-C57BL6J-638850.30,1018093344101580701-1,large,simple,373,"[37, 785]"
-C57BL6J-638850.30,1018093344101280317-4,large,simple,331,"[9, 15]"

@@ -4,9 +4,9 @@ Run one slice from the repository root::
 
     .venv/bin/python experiment/pre_process_query_niche.py \
         --h5ad-file data/20260601_225717/C57BL6J-638850.28.h5ad \
-        --output-dir experiment/query_niche_metrics/preprocessed/large --k-hop 10 --niche-size large
+        --output-dir experiment/query_niches/preprocessed/large --k-hop 10 --niche-size large
 
-This writes ``experiment/query_niche_metrics/C57BL6J-638850.28.csv`` with one row per
+This writes ``experiment/query_niches/C57BL6J-638850.28.csv`` with one row per
 center cell whose niche reaches the target size. Omit ``--h5ad-file`` to process all H5AD files in the default data
 directory, or supply ``--data-dir`` to select another directory. Input H5AD
 files are read-only; existing output CSVs are replaced.
@@ -72,7 +72,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 DEFAULT_DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "20260601_225717"
-DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "query_niche_metrics"
+DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "query_niches"
 
 
 def matches_composition_complexity(
@@ -306,7 +306,7 @@ def export_slice_niche_metrics(
     ``manifests/query_niche_dimensions.json``, resolved to a minimum cell count.
     CSV rows include the selected k.
     Niches with ``target_size_reached=False`` are omitted from the CSV.
-    By default, outputs go under ``query_niche_metrics/<dimension>`` using the
+    By default, outputs go under ``query_niches/<dimension>`` using the
     dimensions manifest.
 
     Files are named ``<slice_name>.csv`` using the H5AD filename stem. The first
@@ -536,7 +536,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output-dir",
         type=Path,
-        help="Output directory (default: query_niche_metrics/<dimension>)",
+        help="Output directory (default: query_niches/<dimension>)",
     )
     parser.add_argument(
         "--k-hop", type=int, default=10, help="Maximum k to try (at least 2)."
