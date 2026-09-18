@@ -40,7 +40,6 @@ DEFAULT_AGGREGATED_METRICS = (
 DEFAULT_MANIFEST = EXPERIMENT_DIR / "manifests" / "query_manifest.csv"
 DEFAULT_OUTPUT_DIR = EXPERIMENT_DIR / "evaluation_results" / "drawings"
 DEFAULT_OUTPUT_NAME = "all_metrics_violin_by_embedding.png"
-DEFAULT_HEATMAP_OUTPUT_NAME = "all_metrics_heatmaps_by_niche_and_embedding.png"
 DEFAULT_DOT_PLOT_OUTPUT_NAME = "aggregated_metrics_cleveland_dot_plot.png"
 DEFAULT_CONFIDENCE_LEVEL = 95.0
 BOOTSTRAP_RESAMPLES = 10_000
@@ -866,26 +865,6 @@ def main() -> None:
     print(
         f"Wrote {output_path} ({len(METRIC_LABELS)} metric panels, "
         f"{DEFAULT_CONFIDENCE_LEVEL:g}% confidence intervals)"
-    )
-
-    mean_heatmap_metrics, niche_order, heatmap_embeddings, task_counts = (
-        load_niche_embedding_metrics(
-            args.metrics.resolve(),
-            args.query_manifest.resolve(),
-        )
-    )
-    heatmap_output_path = (DEFAULT_OUTPUT_DIR / DEFAULT_HEATMAP_OUTPUT_NAME).resolve()
-    draw_all_metrics_heatmaps(
-        mean_heatmap_metrics,
-        niche_order,
-        heatmap_embeddings,
-        task_counts,
-        heatmap_output_path,
-    )
-    print(
-        f"Wrote {heatmap_output_path} "
-        f"({len(METRIC_LABELS)} metrics, {len(niche_order)} niches x "
-        f"{len(heatmap_embeddings)} embeddings)"
     )
 
     aggregated_metrics, aggregated_embedding_order = load_aggregated_metrics(
