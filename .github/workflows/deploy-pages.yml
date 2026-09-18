@@ -1,0 +1,44 @@
+name: Deploy visualization pages
+
+on:
+  push:
+    branches:
+      - chunying
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Assemble site
+        run: |
+          mkdir -p site/large_simple
+          cp experiment/query_niches/selected_query_niches/agent_proposed/large/simple/visualizations/index.html site/large_simple/index.html
+          cp experiment/query_niches/selected_query_niches/agent_proposed/large/simple/visualizations/*.png site/large_simple/
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
