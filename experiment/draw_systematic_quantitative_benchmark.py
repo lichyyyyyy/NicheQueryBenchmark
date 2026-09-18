@@ -37,10 +37,26 @@ DEFAULT_METRICS = (
 DEFAULT_AGGREGATED_METRICS = (
     EXPERIMENT_DIR / "evaluation_results" / "evaluation_metrics_by_embedding_type.csv"
 )
+DEFAULT_TRANSFERABILITY_METRICS = (
+    EXPERIMENT_DIR
+    / "evaluation_results"
+    / "evaluation_metrics_by_embedding_type_and_transferability.csv"
+)
 DEFAULT_MANIFEST = EXPERIMENT_DIR / "manifests" / "query_manifest.csv"
 DEFAULT_OUTPUT_DIR = EXPERIMENT_DIR / "evaluation_results" / "drawings"
 DEFAULT_OUTPUT_NAME = "all_metrics_violin_by_embedding.png"
 DEFAULT_DOT_PLOT_OUTPUT_NAME = "aggregated_metrics_cleveland_dot_plot.png"
+DEFAULT_SLOPE_OUTPUT_NAME = "aggregated_metrics_slope_by_transferability.png"
+TRANSFERABILITY_ORDER = (
+    "same_sample_same_lab",
+    "cross_sample_same_lab",
+    "cross_sample_cross_lab",
+)
+TRANSFERABILITY_LABELS = {
+    "same_sample_same_lab": "same sample",
+    "cross_sample_same_lab": "cross sample, same lab",
+    "cross_sample_cross_lab": "cross sample, cross lab",
+}
 DEFAULT_CONFIDENCE_LEVEL = 95.0
 BOOTSTRAP_RESAMPLES = 10_000
 
@@ -225,6 +241,60 @@ def load_aggregated_metrics(
             f"found {len(embedding_order)}: {embedding_order}"
         )
     return values, embedding_order
+
+
+def load_transferability_metrics(
+    path: Path,
+) -> tuple[dict[str, dict[str, dict[str, float]]], list[str], list[str]]:
+    """Load aggregated metrics indexed by embedding and transferability."""
+    if not path.is_file():
+        raise FileNotFoundError(f"Transferability metrics not found: {path}")
+
+    values: dict[str, dict[str, dict[str, float]]] = {
+        metric: {} for metric in METRIC_LABELS
+    }
+    embedding_order: list[str] = []
+    transferability_order: list[str] = []
+    required = {"embedding_type", "transferability", *METRIC_LABELS}
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"{path} is missing columns: {sorted(missing)}")
+        for line_number, row in enumerate(reader, start=2):
+            embedding = (row.get("embedding_type") or "").strip()
+            transferability = (row.get("transferability") or "").strip()
+            if not embedding or not transferability:
+                raise ValueError(
+                    f"{path}:{line_number}: embedding_type and transferability are required"
+                )
+            if embedding not in embedding_order:
+                embedding_order.append(embedding)
+            if transferability not in transferability_order:
+                transferability_order.append(transferability)
+            for metric in METRIC_LABELS:
+                try:
+                    value = float(row[metric])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{path}:{line_number}: {metric} must be numeric") from exc
+                if not math.isfinite(value):
+                    raise ValueError(f"{path}:{line_number}: {metric} must be finite")
+                if transferability in values[metric].setdefault(embedding, {}):
+                    raise ValueError(
+                        f"{path}:{line_number}: duplicate {embedding!r}/"
+                        f"{transferability!r} row"
+                    )
+                values[metric][embedding][transferability] = value
+
+    if not embedding_order or not transferability_order:
+        raise ValueError(f"Transferability metrics have no data rows: {path}")
+    unknown_tiers = set(transferability_order) - set(TRANSFERABILITY_ORDER)
+    if unknown_tiers:
+        raise ValueError(f"Unsupported transferability tiers: {sorted(unknown_tiers)}")
+    ordered_tiers = [
+        tier for tier in TRANSFERABILITY_ORDER if tier in transferability_order
+    ]
+    return values, embedding_order, ordered_tiers
 
 
 def load_niche_embedding_metrics(
@@ -627,6 +697,81 @@ def draw_aggregated_metrics_dot_plot(
     plt.close(fig)
 
 
+def draw_transferability_slope_chart(
+    metrics: dict[str, dict[str, dict[str, float]]],
+    embedding_order: list[str],
+    transferability_order: list[str],
+    output_path: Path,
+) -> None:
+    """Draw one slope chart panel per metric across transferability tiers."""
+    missing_metrics = set(METRIC_LABELS) - set(metrics)
+    if missing_metrics:
+        raise ValueError(f"Missing slope-chart metrics: {sorted(missing_metrics)}")
+    if len(embedding_order) != EXPECTED_EMBEDDING_COUNT:
+        raise ValueError(
+            f"Slope chart requires {EXPECTED_EMBEDDING_COUNT} embeddings; "
+            f"found {len(embedding_order)}"
+        )
+    if not transferability_order:
+        raise ValueError("Slope chart requires at least one transferability tier")
+
+    x_positions = np.arange(len(transferability_order))
+    fig, axes = plt.subplots(4, 4, figsize=(22, 18), squeeze=False)
+    for axis, metric in zip(axes.flat, METRIC_LABELS):
+        for embedding, color, marker in zip(embedding_order, COLORS, MARKERS):
+            missing_tiers = set(transferability_order) - set(
+                metrics[metric].get(embedding, {})
+            )
+            if missing_tiers:
+                raise ValueError(
+                    f"{metric} is missing {embedding} tiers: {sorted(missing_tiers)}"
+                )
+            values = [metrics[metric][embedding][tier] for tier in transferability_order]
+            axis.plot(
+                x_positions,
+                values,
+                color=color,
+                marker=marker,
+                linewidth=2.0,
+                markersize=6,
+                label=EMBEDDING_LABELS.get(embedding, embedding.replace("_", " ")).replace(
+                    "\n", " "
+                ),
+            )
+        axis.set_title(METRIC_LABELS[metric], fontsize=11, weight="bold")
+        axis.set_xticks(
+            x_positions,
+            [TRANSFERABILITY_LABELS[tier] for tier in transferability_order],
+        )
+        axis.grid(axis="y", color="#D9DDE2", linewidth=0.8)
+        axis.set_axisbelow(True)
+        axis.spines[["top", "right"]].set_visible(False)
+        axis.tick_params(axis="both", labelsize=8)
+    for axis in axes.flat[len(METRIC_LABELS) :]:
+        axis.set_visible(False)
+
+    fig.suptitle(
+        "Aggregated Query Metrics by Transferability and Embedding",
+        fontsize=18,
+        weight="bold",
+        y=0.98,
+    )
+    handles, labels = axes.flat[0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.95),
+        ncols=len(embedding_order),
+        frameon=False,
+        fontsize=10,
+    )
+    fig.subplots_adjust(left=0.06, right=0.98, bottom=0.07, top=0.88, hspace=0.42, wspace=0.25)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=240, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
 def draw_all_metrics_heatmaps(
     mean_metrics: dict[str, np.ndarray],
     niche_order: list[str],
@@ -835,6 +980,12 @@ def parse_args() -> argparse.Namespace:
         help="Aggregated metrics CSV for the Cleveland dot plot (default: %(default)s)",
     )
     parser.add_argument(
+        "--transferability-metrics",
+        type=Path,
+        default=DEFAULT_TRANSFERABILITY_METRICS,
+        help="Combined embedding/transferability metrics CSV for the slope chart.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT_DIR / DEFAULT_OUTPUT_NAME,
@@ -845,6 +996,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_OUTPUT_DIR / DEFAULT_DOT_PLOT_OUTPUT_NAME,
         help="Cleveland dot plot output path (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--slope-output",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR / DEFAULT_SLOPE_OUTPUT_NAME,
+        help="Transferability slope chart output path (default: %(default)s)",
     )
     return parser.parse_args()
 
@@ -879,6 +1036,22 @@ def main() -> None:
     print(
         f"Wrote {dot_output_path} "
         f"({len(METRIC_LABELS)} metrics x {len(aggregated_embedding_order)} embeddings)"
+    )
+
+    transferability_metrics, slope_embeddings, transferability_order = (
+        load_transferability_metrics(args.transferability_metrics.resolve())
+    )
+    slope_output_path = args.slope_output.resolve()
+    draw_transferability_slope_chart(
+        transferability_metrics,
+        slope_embeddings,
+        transferability_order,
+        slope_output_path,
+    )
+    print(
+        f"Wrote {slope_output_path} "
+        f"({len(METRIC_LABELS)} metrics x {len(slope_embeddings)} embeddings x "
+        f"{len(transferability_order)} transferability tiers)"
     )
 
 

@@ -13,7 +13,7 @@ Examples::
     # Generate only the requested dimension combination.
     .venv/bin/python experiment/aggregate_per_query_metrics.py \
         --dimension embedding_type,transferability \
-        --output experiment/evaluation_results/evaluation_metrics_by_embedding_and_transferability.csv
+        --output experiment/evaluation_results/evaluation_metrics_by_embedding_type_and_transferability.csv
 """
 
 from __future__ import annotations
@@ -507,7 +507,9 @@ def main() -> None:
     )
     aggregated = aggregate_metrics(rows, manifest, dimension_arg)
     write_metrics(aggregated, output, dimensions)
-    logger.info("Wrote %d %s aggregate rows to %s", len(aggregated), args.dimension, output)
+    logger.info(
+        "Wrote %d %s aggregate rows to %s", len(aggregated), args.dimension, output
+    )
 
 
 if __name__ == "__main__":
