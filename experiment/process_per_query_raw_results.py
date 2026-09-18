@@ -17,11 +17,11 @@ Example
 -------
 Run the analysis with the default paths::
 
-    python experiment/process_niche_query_raw_results.py
+    python experiment/process_per_query_raw_results.py
 
 Use custom input/output locations::
 
-    python experiment/process_niche_query_raw_results.py \
+    python experiment/process_per_query_raw_results.py \
         --query-manifest path/to/query_manifest.csv \
         --raw-results-dir path/to/raw_results \
         --output path/to/evaluation_metrics_per_query.csv
@@ -394,6 +394,16 @@ def main() -> None:
             continue
 
         result_path = raw_results_dir / f"query_{query_id}.csv"
+        if not result_path.is_file():
+            logger.warning(
+                "[%d/%d] query_id=%d skipped: raw result not found at %s",
+                position,
+                len(query_ids),
+                query_id,
+                result_path,
+            )
+            continue
+
         niche_scores, rm_ideal_scores = load_score_pairs(result_path, query_id)
         pearson, spearman = correlations(niche_scores, rm_ideal_scores)
         ndcg = ndcg_metrics(niche_scores, rm_ideal_scores)

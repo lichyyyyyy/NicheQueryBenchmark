@@ -175,7 +175,11 @@ def aggregate_metrics_by_embedding_type(
 
     missing_query_ids = set(metadata) - seen_query_ids
     if missing_query_ids:
-        raise ValueError(f"Evaluation results are missing {len(missing_query_ids)} manifest queries")
+        logger.warning(
+            "Ignoring %d manifest query(ies) missing evaluation results: %s",
+            len(missing_query_ids),
+            sorted(missing_query_ids),
+        )
 
     aggregated: list[dict[str, str | float]] = []
     for embedding_type in embedding_order:

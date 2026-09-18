@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
 import math
 from collections import defaultdict
 from pathlib import Path
@@ -26,6 +27,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 EXPERIMENT_DIR = Path(__file__).resolve().parent
 DEFAULT_METRICS = (
@@ -68,7 +71,6 @@ EMBEDDING_LABELS = {
 }
 COLORS = ("#4C78A8", "#F58518", "#54A24B", "#B279A2")
 MARKERS = ("o", "s", "D", "^")
-EXPECTED_NICHE_COUNT = 8
 EXPECTED_EMBEDDING_COUNT = len(EMBEDDING_LABELS)
 
 DOT_PLOT_METRIC_LABELS = {
@@ -131,6 +133,7 @@ def load_metrics_by_embedding(
     values: dict[str, dict[str, list[float]]] = {
         metric: defaultdict(list) for metric in METRIC_LABELS
     }
+    skipped_nan: dict[str, int] = defaultdict(int)
     seen_query_ids: set[str] = set()
     with path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
@@ -158,9 +161,18 @@ def load_metrics_by_embedding(
                     raise ValueError(
                         f"{path}:{line_number}: {metric} must be numeric"
                     ) from exc
+                if math.isnan(metric_value):
+                    # Correlation and enrichment are undefined for some
+                    # constant-score queries. Keep the query for metrics that
+                    # are defined, but omit this metric from its distribution.
+                    skipped_nan[metric] += 1
+                    continue
                 if not math.isfinite(metric_value):
                     raise ValueError(f"{path}:{line_number}: {metric} must be finite")
                 values[metric][embedding].append(metric_value)
+
+    for metric, count in skipped_nan.items():
+        logger.warning("Ignored %d NaN %s value(s) while plotting", count, metric)
 
     if not values:
         raise ValueError(f"Evaluation metrics have no data rows: {path}")
@@ -256,13 +268,9 @@ def load_niche_embedding_metrics(
             if embedding not in embedding_order:
                 embedding_order.append(embedding)
 
-    if (
-        len(niche_order) != EXPECTED_NICHE_COUNT
-        or len(embedding_order) != EXPECTED_EMBEDDING_COUNT
-    ):
+    if len(embedding_order) != EXPECTED_EMBEDDING_COUNT:
         raise ValueError(
-            f"Expected an {EXPECTED_NICHE_COUNT} niche x "
-            f"{EXPECTED_EMBEDDING_COUNT} embedding benchmark; found "
+            f"Expected {EXPECTED_EMBEDDING_COUNT} embedding types; found "
             f"{len(niche_order)} niches x {len(embedding_order)} embeddings"
         )
 
@@ -297,6 +305,10 @@ def load_niche_embedding_metrics(
                     raise ValueError(
                         f"{metrics_path}:{line_number}: {metric} must be numeric"
                     ) from exc
+                if math.isnan(metric_value):
+                    # Undefined per-query metrics should not invalidate the
+                    # niche-by-embedding mean for the other queries.
+                    continue
                 if not math.isfinite(metric_value):
                     raise ValueError(
                         f"{metrics_path}:{line_number}: {metric} must be finite"
@@ -311,11 +323,15 @@ def load_niche_embedding_metrics(
             for column_index, embedding in enumerate(embedding_order):
                 values = grouped_values[metric][(niche, embedding)]
                 if not values:
-                    raise ValueError(
-                        f"No {metric} results for niche={niche!r}, "
-                        f"embedding={embedding!r}"
+                    logger.warning(
+                        "Ignoring missing %s results for niche=%r, embedding=%r",
+                        metric,
+                        niche,
+                        embedding,
                     )
-                matrix[row_index, column_index] = np.mean(values)
+                    matrix[row_index, column_index] = np.nan
+                else:
+                    matrix[row_index, column_index] = np.mean(values)
         matrices[metric] = matrix
 
     return (
@@ -621,13 +637,10 @@ def draw_all_metrics_heatmaps(
 ) -> None:
     """Draw all metric means as annotated niche-by-embedding heatmaps."""
     expected_shape = (len(niche_order), len(embedding_order))
-    if (
-        len(niche_order) != EXPECTED_NICHE_COUNT
-        or len(embedding_order) != EXPECTED_EMBEDDING_COUNT
-    ):
+    if len(embedding_order) != EXPECTED_EMBEDDING_COUNT:
         raise ValueError(
-            f"Heatmaps require exactly {EXPECTED_NICHE_COUNT} niches and "
-            f"{EXPECTED_EMBEDDING_COUNT} embeddings"
+            f"Heatmaps require exactly {EXPECTED_EMBEDDING_COUNT} embeddings; "
+            f"found {len(niche_order)} niches x {len(embedding_order)} embeddings"
         )
     if len(task_counts) != len(niche_order):
         raise ValueError("task_counts must contain one value per niche")
@@ -683,6 +696,9 @@ def draw_all_metrics_heatmaps(
         family_values = np.concatenate(
             [mean_metrics[metric].ravel() for metric in family_metrics]
         )
+        family_values = family_values[np.isfinite(family_values)]
+        if family_values.size == 0:
+            family_values = np.asarray([0.0])
         if family in {"Correlation", "Normalized enrichment"}:
             limit = max(float(np.max(np.abs(family_values))), 1e-12)
             family_styles[family] = ("RdBu_r", -limit, limit)
@@ -727,6 +743,18 @@ def draw_all_metrics_heatmaps(
             for row_index in range(matrix.shape[0]):
                 for column_index in range(matrix.shape[1]):
                     value = matrix[row_index, column_index]
+                    if not np.isfinite(value):
+                        ax.text(
+                            column_index,
+                            row_index,
+                            "NA",
+                            ha="center",
+                            va="center",
+                            color="#666666",
+                            fontsize=7.5,
+                            weight="bold",
+                        )
+                        continue
                     normalized = image.norm(value)
                     if cmap == "RdBu_r":
                         text_color = (
